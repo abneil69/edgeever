@@ -1,7 +1,7 @@
 import type { NotebookUpdateInput } from "@edgeever/shared";
 import { assertLocalMemoSnapshot } from "./local-memo-guard";
 import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
-import { markdownToDoc, type MemoDetail, type MemoRevision, type MemoTemplate, type Notebook, type Resource, type ResourceListItem, type ResourceStorageSummary, type TagSummary, type TiptapDoc } from "@edgeever/shared";
+import { emptyDoc, hasEncryptedNoteMarker, markdownToDoc, type MemoDetail, type MemoRevision, type MemoTemplate, type Notebook, type Resource, type ResourceListItem, type ResourceStorageSummary, type TagSummary, type TiptapDoc } from "@edgeever/shared";
 import { api } from "@/lib/api";
 import {
   getLocalMemo,
@@ -590,7 +590,7 @@ export const createWebRepository = (scope: string): EdgeEverRepository => {
   async updateMemo(memo, input, options) {
     const payload: MemoUpdateSyncPayload = { ...input, memoId: memo.id };
     const updated = await runLocalDatabaseOperationWithRecovery(() =>
-      localDb.transaction("rw", [localDb.memos, localDb.syncQueue], async () => {
+      localDb.transaction("rw", [localDb.memos, localDb.syncQueue, localDb.revisions, localDb.drafts], async () => {
         if (options?.guardLocalSnapshot) {
           const current = await getLocalMemo(scope, memo.id);
           const queued = await localDb.syncQueue.get(`memo.update:${memo.id}`);
@@ -645,7 +645,9 @@ export const createWebRepository = (scope: string): EdgeEverRepository => {
       if (isOffline()) throw new Error("Revision is not available offline");
       return api.restoreMemoRevision(memoId, revisionId);
     }
-    const contentJson = markdownToDoc(revision.contentMarkdown);
+    const contentJson = hasEncryptedNoteMarker(revision.contentMarkdown)
+      ? emptyDoc()
+      : markdownToDoc(revision.contentMarkdown);
     const updated = await putLocalMemoUpdate(scope, memo, {
       title: revision.title ?? "",
       contentJson,

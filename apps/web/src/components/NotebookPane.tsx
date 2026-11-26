@@ -29,6 +29,7 @@ import {
   Download,
   RotateCcw,
   FileText,
+  Lock,
   Workflow,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -327,6 +328,10 @@ const CreateMemoTypeItems = ({
       <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo()}>
         <FileText className="h-4 w-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">{t("diagram.normalNote")}</span>
+      </DropdownMenuItem>
+      <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("encrypted")}>
+        <Lock className="h-4 w-4 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{t("e2ee.newEncryptedNote")}</span>
       </DropdownMenuItem>
       <DropdownMenuItem className="gap-2 text-xs leading-5" onSelect={() => onCreateMemo("mind-map")}>
         <GitFork className="h-4 w-4 shrink-0" />

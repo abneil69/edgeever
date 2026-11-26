@@ -7,7 +7,7 @@ import type {
   DesktopRpcParams,
   DesktopRpcResponses,
 } from "@edgeever/shared";
-import { docToMarkdown, docToText, markdownToDoc, type MemoDetail } from "@edgeever/shared";
+import { docToMarkdown, docToText, emptyDoc, hasEncryptedNoteMarker, markdownToDoc, type MemoDetail } from "@edgeever/shared";
 import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
 import type { EdgeEverRepository } from "@/lib/repository";
 import { api, getConfiguredDesktopApiBaseUrl } from "@/lib/api";
@@ -319,12 +319,13 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
   createMemo: (input) => {
     // The sidecar fallback wraps raw lines as paragraphs; parse Markdown here
     // with the same schema used by the editor before persisting a new note.
-    const contentJson = input.contentJson ?? markdownToDoc(input.contentMarkdown ?? "");
+    const encrypted = hasEncryptedNoteMarker(input.contentMarkdown);
+    const contentJson = encrypted ? emptyDoc() : (input.contentJson ?? markdownToDoc(input.contentMarkdown ?? ""));
     const rpcParams: DesktopMemoCreateParams = {
       ...input,
       contentJson,
-      contentMarkdown: mapMarkdownResourceUrls(input.contentMarkdown, toApiResourceUrl),
-      contentText: docToText(contentJson),
+      contentMarkdown: encrypted ? input.contentMarkdown : mapMarkdownResourceUrls(input.contentMarkdown, toApiResourceUrl),
+      contentText: encrypted ? "" : docToText(contentJson),
     };
     return request("memo.create", rpcParams).then((result) => {
       window.dispatchEvent(new CustomEvent("edgeever:sync-queue-changed"));
@@ -357,14 +358,16 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
         typeof repairedInput.contentMarkdown === "string" ? repairedInput.contentMarkdown : input.contentMarkdown,
         toApiResourceUrl,
       );
+    const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
+    const safeContentJson = isEncrypted ? emptyDoc() : portableContentJson;
     const rpcParams: DesktopMemoUpdateParams & { contentText: string } = {
       memoId: memo.id,
       expectedRevision: memo.revision,
       expectedContentHash: memo.contentHash,
       title: input.title,
-      contentJson: portableContentJson,
+      contentJson: safeContentJson,
       contentMarkdown,
-      contentText: docToText(portableContentJson),
+      contentText: isEncrypted ? "" : docToText(safeContentJson),
       tags: input.tags,
     };
     let result;

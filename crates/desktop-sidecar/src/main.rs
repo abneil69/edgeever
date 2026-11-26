@@ -958,15 +958,250 @@ mod tests {
             }] }),
         )
         .unwrap();
+    #[test]
+    fn encrypted_notes_are_isolated_in_sidecar_storage_search_and_merge() {
+        let database = Connection::open_in_memory().unwrap();
+        database
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE _edgeever_sidecar_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL);
+                 CREATE TABLE _edgeever_sidecar_outbox (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   kind TEXT NOT NULL,
+                   entity_id TEXT NOT NULL,
+                   payload_json TEXT NOT NULL,
+                   status TEXT NOT NULL DEFAULT 'pending',
+                   attempt_count INTEGER NOT NULL DEFAULT 0,
+                   last_error TEXT,
+                   last_error_code TEXT,
+                   retryable INTEGER NOT NULL DEFAULT 1,
+                   next_attempt_at TEXT,
+                   version INTEGER NOT NULL DEFAULT 1,
+                   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                 );
+                 CREATE TABLE notebooks (
+                   id TEXT PRIMARY KEY,
+                   parent_id TEXT,
+                   name TEXT NOT NULL,
+                   slug TEXT,
+                   is_deleted INTEGER NOT NULL DEFAULT 0,
+                   created_at TEXT NOT NULL DEFAULT 'now',
+                   updated_at TEXT NOT NULL DEFAULT 'now',
+                   deleted_at TEXT
+                 );
+                 CREATE TABLE memos (
+                   id TEXT PRIMARY KEY,
+                   notebook_id TEXT NOT NULL REFERENCES notebooks(id),
+                   title TEXT,
+                   excerpt TEXT NOT NULL DEFAULT '',
+                   tags_json TEXT NOT NULL DEFAULT '[]',
+                   is_pinned INTEGER NOT NULL DEFAULT 0,
+                   is_archived INTEGER NOT NULL DEFAULT 0,
+                   is_deleted INTEGER NOT NULL DEFAULT 0,
+                   source_memo_ids TEXT NOT NULL DEFAULT '[]',
+                   merge_source_count INTEGER NOT NULL DEFAULT 0,
+                   merged_into_memo_id TEXT,
+                   merged_at TEXT,
+                   created_by TEXT NOT NULL DEFAULT 'desktop',
+                   updated_by TEXT NOT NULL DEFAULT 'desktop',
+                   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                   deleted_at TEXT
+                 );
+                 CREATE TABLE memo_contents (
+                   memo_id TEXT PRIMARY KEY REFERENCES memos(id) ON DELETE CASCADE,
+                   content_json TEXT NOT NULL,
+                   content_markdown TEXT NOT NULL,
+                   content_text TEXT NOT NULL,
+                   content_hash TEXT NOT NULL,
+                   revision INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                 );
+                 CREATE TABLE memo_revisions (
+                   id TEXT PRIMARY KEY,
+                   memo_id TEXT NOT NULL REFERENCES memos(id) ON DELETE CASCADE,
+                   revision INTEGER NOT NULL,
+                   title TEXT,
+                   tags_json TEXT NOT NULL DEFAULT '[]',
+                   content_json TEXT NOT NULL,
+                   content_markdown TEXT NOT NULL,
+                   content_text TEXT NOT NULL DEFAULT '',
+                   content_hash TEXT NOT NULL,
+                   created_by TEXT NOT NULL DEFAULT 'desktop',
+                   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                 );
+                 CREATE TABLE resources (
+                   id TEXT PRIMARY KEY,
+                   memo_id TEXT NOT NULL REFERENCES memos(id),
+                   original_memo_id TEXT,
+                   is_deleted INTEGER NOT NULL DEFAULT 0,
+                   updated_at TEXT NOT NULL DEFAULT 'now'
+                 );
+                 INSERT INTO notebooks (id, name, slug) VALUES ('nb_inbox', 'Inbox', 'inbox');",
+            )
+            .unwrap();
+
+        let envelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_sidecar_test\",\"wrappedDek\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dekIv\":\"AAAAAAAAAAAAAAAA\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"CIPHER_SECRET_TOKEN_XYZ\"}\n```";
+
+        let created = crate::memo::create_memo(
+            &database,
+            &json!({
+                "notebookId": "nb_inbox",
+                "title": "Secret Vault",
+                "contentMarkdown": envelope,
+                "contentText": "LEAKED_TEXT",
+                "tags": ["vault"]
+            }),
+        )
+        .unwrap();
+        let encrypted_id = created["id"].as_str().unwrap().to_owned();
+        assert_eq!(created["excerpt"], "");
+        assert_eq!(created["contentText"], "");
         assert_eq!(
-            database
-                .query_row(
-                    "SELECT is_deleted FROM notebooks WHERE id = 'ws_default_inbox'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
+            created["contentJson"],
+            json!({"type": "doc", "content": [{"type": "paragraph"}]})
         );
+
+        let by_cipher = crate::memo::list_memos(&database, &json!({ "q": "CIPHER_SECRET_TOKEN_XYZ" })).unwrap();
+        assert_eq!(by_cipher["memos"].as_array().unwrap().len(), 0);
+        let by_title = crate::memo::list_memos(&database, &json!({ "q": "Secret Vault" })).unwrap();
+        assert_eq!(by_title["memos"].as_array().unwrap().len(), 1);
+        assert_eq!(by_title["memos"][0]["encrypted"], true);
+        assert_eq!(by_title["memos"][0]["excerpt"], "");
+
+        let plain = crate::memo::create_memo(
+            &database,
+            &json!({
+                "notebookId": "nb_inbox",
+                "title": "Plain Note",
+                "contentMarkdown": "plain body",
+                "tags": []
+            }),
+        )
+        .unwrap();
+        let plain_id = plain["id"].as_str().unwrap().to_owned();
+
+        // Merging an encrypted note must be rejected.
+        let merge_err = crate::memo::merge_memos(
+            &database,
+            &json!({ "memoIds": [encrypted_id, plain_id] }),
+        )
+        .unwrap_err();
+        assert!(merge_err.contains("Encrypted"));
+
+        // Plain note with an active resource cannot be encrypted.
+        database
+            .execute(
+                "INSERT INTO resources (id, memo_id, is_deleted) VALUES ('res_1', ?1, 0)",
+                [&plain_id],
+            )
+            .unwrap();
+        database
+            .execute(
+                "INSERT INTO memo_revisions (id, memo_id, revision, title, content_json, content_markdown, content_text, content_hash) VALUES ('rev_plain', ?1, 1, 'Plain Note', '{}', 'old plain secret', 'old plain secret', 'h1')",
+                [&plain_id],
+            )
+            .unwrap();
+        let attach_err = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": plain_id,
+                "title": "Plain Note",
+                "contentMarkdown": envelope,
+                "tags": []
+            }),
+        )
+        .unwrap_err();
+        assert!(attach_err.contains("attachments"));
+
+        // Once resource is removed, encrypting wipes cached plaintext revisions atomically.
+        database
+            .execute("UPDATE resources SET is_deleted = 1 WHERE id = 'res_1'", [])
+            .unwrap();
+        let converted = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": plain_id,
+                "title": "Plain Note",
+                "contentMarkdown": envelope,
+                "tags": []
+            }),
+        )
+        .unwrap();
+        assert_eq!(converted["excerpt"], "");
+        assert_eq!(converted["contentText"], "");
+        let remaining_revs: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM memo_revisions WHERE memo_id = ?1",
+                [&plain_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining_revs, 0);
+
+        // Sync upsert forces empty excerpt/content_text/empty doc and wipes old plaintext revisions.
+        let synced_plain = crate::memo::create_memo(
+            &database,
+            &json!({
+                "notebookId": "nb_inbox",
+                "title": "Synced",
+                "contentMarkdown": "plain sync body",
+                "tags": []
+            }),
+        )
+        .unwrap();
+        let synced_id = synced_plain["id"].as_str().unwrap().to_owned();
+        database
+            .execute(
+                "INSERT INTO memo_revisions (id, memo_id, revision, title, content_json, content_markdown, content_text, content_hash) VALUES ('rev_sync_plain', ?1, 1, 'Synced', '{}', 'plain sync body', 'plain sync body', 'h2')",
+                [&synced_id],
+            )
+            .unwrap();
+        apply_sync_changes(
+            &database,
+            &json!({ "changes": [{
+                "entityType": "memo",
+                "operation": "upsert",
+                "entityId": synced_id,
+                "memo": {
+                    "id": synced_id,
+                    "notebookId": "nb_inbox",
+                    "title": "Synced",
+                    "excerpt": "SHOULD_BE_STRIPPED",
+                    "tags": [],
+                    "isPinned": false,
+                    "isArchived": false,
+                    "isDeleted": false,
+                    "sourceMemoIds": [],
+                    "mergeSourceCount": 0,
+                    "mergedIntoMemoId": null,
+                    "createdAt": "2026-09-10T00:00:00.000Z",
+                    "updatedAt": "2026-09-10T00:00:00.000Z",
+                    "deletedAt": null,
+                    "contentJson": { "type": "doc", "content": [{ "type": "paragraph", "content": [{ "type": "text", "text": "LEAK" }] }] },
+                    "contentMarkdown": envelope,
+                    "contentText": "SHOULD_BE_STRIPPED",
+                    "contentHash": "hash_sync_enc",
+                    "revision": 2
+                }
+            }] }),
+        )
+        .unwrap();
+        let synced_after = crate::memo::memo_value(&database, &synced_id, true).unwrap();
+        assert_eq!(synced_after["excerpt"], "");
+        assert_eq!(synced_after["contentText"], "");
+        assert_eq!(
+            synced_after["contentJson"],
+            json!({"type": "doc", "content": [{"type": "paragraph"}]})
+        );
+        let synced_revs: i64 = database
+            .query_row(
+                "SELECT COUNT(*) FROM memo_revisions WHERE memo_id = ?1",
+                [&synced_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(synced_revs, 0);
     }
 }

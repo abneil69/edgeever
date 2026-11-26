@@ -1,4 +1,4 @@
-import { hasEncryptedNoteMarker } from "@edgeever/shared";
+import { hasEncryptedNoteMarker } from "@edgeever/shared/e2ee";
 import { getMemoDisplayTitle } from "@edgeever/shared/memo-title";
 import { isValidMemoShareSlug } from "@edgeever/shared/share-slug";
 import { PUBLIC_PAGE_HEADERS, PUBLIC_PAGE_ROBOTS } from "@edgeever/shared/public-page-headers";

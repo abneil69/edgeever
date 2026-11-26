@@ -22,6 +22,8 @@ import { RefreshCw } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import * as m from "motion/react-m";
 import { MemoListPane, MemoSelectionActionBar } from "./MemoListPane";
+import { E2eeSetupDialog, E2eeUnlockDialog } from "./e2ee/E2eePassphraseDialogs";
+import { createEncryptedMemoOnline, e2eeSession } from "@/lib/e2ee";
 import { MobileBottomNav, MobileNotebookPicker } from "./WorkspaceMobileChrome";
 import { AppConfirmDialog, MemoDeleteConfirmDialog, NotebookNameDialog } from "./dialogs/ConfirmDialogs";
 import { shouldDiscardPluginNoteSearchRequest } from "./editor/note-search";
@@ -211,6 +213,18 @@ export const WorkspaceApp = ({
     [user?.id]
   );
   const repository = useMemo(() => createRepository(localDataScope), [localDataScope]);
+  const [e2eeSetupDialogOpen, setE2eeSetupDialogOpen] = useState(false);
+  const [e2eeUnlockDialogOpen, setE2eeUnlockDialogOpen] = useState(false);
+  const [pendingEncryptedCreateNotebookId, setPendingEncryptedCreateNotebookId] = useState<string | null>(null);
+
+  useEffect(() => {
+    e2eeSession.setScope(localDataScope);
+    if (!demoMode) {
+      void e2eeSession.refreshKeyring(api.getE2eeKeyring).catch(() => undefined);
+    }
+  }, [demoMode, localDataScope]);
+
+  useEffect(() => e2eeSession.attachBrowserListeners(), []);
   const isInitialSettingsRoute = route.isSettings;
   const isInitialPluginsRoute = route.isPlugins;
   const isInitialTemplatesRoute = route.isTemplates;
@@ -1845,6 +1859,30 @@ export const WorkspaceApp = ({
     }
   }, [desktopShareNotebookId]);
 
+  const executeCreateEncryptedMemo = useCallback(async (targetNotebookId: string) => {
+    createMemoInFlightRef.current = true;
+    creatingMemoSelectionRef.current = true;
+    try {
+      const data = await createEncryptedMemoOnline({
+        scope: localDataScope,
+        notebookId: targetNotebookId,
+      });
+      revealCreatedMemo(data.memo);
+    } catch (error) {
+      clearPendingCreatedMemo();
+      setCreatedMemoEditId(null);
+      const code = (error as { code?: string } | null)?.code;
+      setAppNoticeDialog({
+        title: t("e2ee.newEncryptedNote"),
+        description: code === "e2ee_offline_create_unsupported"
+          ? t("e2ee.offlineCreateBlocked")
+          : (error instanceof Error ? error.message : t("e2ee.decryptFailed")),
+      });
+    } finally {
+      createMemoInFlightRef.current = false;
+    }
+  }, [clearPendingCreatedMemo, localDataScope, revealCreatedMemo, t]);
+
   const handleCreateMemo = (kind?: NoteCreateKind) => {
     const targetNotebookId = createMemoNotebookId;
 
@@ -1855,6 +1893,31 @@ export const WorkspaceApp = ({
     // Desktop Cmd+N is handled by both the native menu and the in-app shortcut.
     // A second click can also land before React Query flips `isPending`.
     if (createMemoInFlightRef.current || createMemoMutation.isPending) {
+      return;
+    }
+    if (kind === "encrypted") {
+      if (demoMode) {
+        setAppNoticeDialog({ title: t("e2ee.newEncryptedNote"), description: t("e2ee.demoUnsupported") });
+        return;
+      }
+      if (isBrowserOffline()) {
+        setAppNoticeDialog({ title: t("e2ee.newEncryptedNote"), description: t("e2ee.offlineCreateBlocked") });
+        return;
+      }
+      setTemplatesOpen(false);
+      setMobileBottomNavActive("home");
+      const current = e2eeSession.getSnapshot();
+      if (!current.configured) {
+        setPendingEncryptedCreateNotebookId(targetNotebookId);
+        setE2eeSetupDialogOpen(true);
+        return;
+      }
+      if (!current.unlocked) {
+        setPendingEncryptedCreateNotebookId(targetNotebookId);
+        setE2eeUnlockDialogOpen(true);
+        return;
+      }
+      void executeCreateEncryptedMemo(targetNotebookId);
       return;
     }
     createMemoInFlightRef.current = true;
@@ -2225,14 +2288,17 @@ export const WorkspaceApp = ({
             : !canMoveSelectedMemos
               ? t("workspace.selection.alreadyInNotebook")
               : t("workspace.selection.move");
+  const selectionHasEncrypted = selectedMemosInCurrentList.some((memo) => Boolean(memo.encrypted));
   const selectionMergeTitle =
     selectedMemoIds.size < 2
       ? t("workspace.selection.needTwoMemos")
       : memoView === "trash"
         ? t("workspace.selection.trashCannotMerge")
-        : mergeMutation.isPending
-          ? t("workspace.selection.merging")
-          : t("workspace.selection.merge");
+        : selectionHasEncrypted
+          ? t("e2ee.encryptedMergeDisabled")
+          : mergeMutation.isPending
+            ? t("workspace.selection.merging")
+            : t("workspace.selection.merge");
   const selectionExportTitle =
     selectedMemoIds.size === 0
       ? t("workspace.selection.chooseMemo")
@@ -2254,6 +2320,7 @@ export const WorkspaceApp = ({
           : t("workspace.selection.delete");
   const memoSelectionActionBar = memoSelectionModeActive ? (
     <MemoSelectionActionBar
+      canMerge={!selectionHasEncrypted}
       canMove={canMoveSelectedMemos}
       deleteTitle={selectionDeleteTitle}
       exportTitle={selectionExportTitle}
@@ -4020,6 +4087,30 @@ export const WorkspaceApp = ({
           onSelect={handleSelectNotebook}
         />
       )}
+      <E2eeSetupDialog
+        open={e2eeSetupDialogOpen}
+        onOpenChange={(open) => {
+          setE2eeSetupDialogOpen(open);
+          if (!open) setPendingEncryptedCreateNotebookId(null);
+        }}
+        onConfigured={() => {
+          const targetNotebook = pendingEncryptedCreateNotebookId;
+          setPendingEncryptedCreateNotebookId(null);
+          if (targetNotebook) void executeCreateEncryptedMemo(targetNotebook);
+        }}
+      />
+      <E2eeUnlockDialog
+        open={e2eeUnlockDialogOpen}
+        onOpenChange={(open) => {
+          setE2eeUnlockDialogOpen(open);
+          if (!open) setPendingEncryptedCreateNotebookId(null);
+        }}
+        onUnlocked={() => {
+          const targetNotebook = pendingEncryptedCreateNotebookId;
+          setPendingEncryptedCreateNotebookId(null);
+          if (targetNotebook) void executeCreateEncryptedMemo(targetNotebook);
+        }}
+      />
       </div>
     </WorkspaceMotionProvider>
   );

@@ -1,4 +1,4 @@
-import { app, autoUpdater as nativeAutoUpdater, Notification, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, ipcMain, session, net, protocol, shell, dialog, safeStorage, clipboard, ClipboardItem, powerMonitor, desktopCapturer, screen, utilityProcess } from "electron";
+import { app, autoUpdater as nativeAutoUpdater, Notification, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, ipcMain, session, net, protocol, shell, dialog, safeStorage, systemPreferences, clipboard, ClipboardItem, powerMonitor, desktopCapturer, screen, utilityProcess } from "electron";
 import { createReadStream, existsSync } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
@@ -11,6 +11,7 @@ import { BackupManager } from "./backup-manager.mjs";
 import { OffsiteBackup } from "./backup-offsite.mjs";
 import { createBackupWorkerFactory } from "./backup-worker.mjs";
 import { registerBackupIpc } from "./backup-ipc.mjs";
+import { createE2eeBiometricStore, registerE2eeBiometricIpc } from "./e2ee-biometric.mjs";
 import { SidecarRpcClient } from "./rpc.mjs";
 import { instanceOrigin, decodeSessionCredential, credentialForUrl, writeSessionCredential, clearInstanceSessionCookie } from "./session-credential.mjs";
 import { resourceRequestHeaders } from "./resource-request.mjs";
@@ -1715,6 +1716,30 @@ const startApplication = async () => {
     },
   });
   registerBackupIpc({ ipcMain, manager: backupManager, getWindow: () => mainWindow, dialog, shell });
+  const e2eeBiometricStore = createE2eeBiometricStore({
+    platform: process.platform,
+    systemPreferences,
+    safeStorage,
+    getScope: () => ({
+      userDataDirectory: app.getPath("userData"),
+      apiBaseUrl: configuredApiBaseUrl,
+      accountId: activeAccountId,
+    }),
+  });
+  registerE2eeBiometricIpc({
+    ipcMain,
+    store: e2eeBiometricStore,
+    isTrustedSender: isAppRendererSender,
+  });
+  const broadcastE2eeLock = (reason) => {
+    const payload = { reason };
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send("desktop:e2ee-lock", payload);
+    }
+    noteWindows.broadcast("desktop:e2ee-lock", payload);
+  };
+  powerMonitor.on("lock-screen", () => { broadcastE2eeLock("lock-screen"); });
+  powerMonitor.on("suspend", () => { broadcastE2eeLock("suspend"); });
   void checkBackups();
   backupCheckTimer = setInterval(() => { void checkBackups(); }, 3600000);
   powerMonitor.on("resume", () => { void checkBackups(); });
@@ -1759,6 +1784,7 @@ const startApplication = async () => {
       return { ready: true, scope: nextScopeKey };
     }
     // Let open note windows save into the current account before it changes.
+    broadcastE2eeLock("account-changed");
     await noteWindows.closeAll();
     if (backupManager.context?.baseUrl !== configuredApiBaseUrl || backupManager.context?.accountId !== normalizedAccountId) await backupManager.setContext(null);
     await stopSidecar();
@@ -1819,6 +1845,7 @@ const startApplication = async () => {
     if (event.sender !== mainWindow?.webContents || event.senderFrame !== event.sender.mainFrame || instanceChangePending) throw new Error("Session update forbidden");
     attachmentSessionActive = false;
     attachmentWriteback?.suspend();
+    broadcastE2eeLock("logout");
     await noteWindows.closeAll();
     scheduledTaskScheduler.clear();
     await backupManager.setContext(null);

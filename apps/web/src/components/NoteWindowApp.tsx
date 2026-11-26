@@ -11,6 +11,7 @@ import { getPersistentDataScopeOrigin } from "@/lib/app-page-path";
 import { getShortcutActionForEvent, readImageCompressionPreference, readShortcutSettingsPreference } from "@/lib/app-helpers";
 import { noteWindowSyncCompletedDetail } from "@/lib/desktop-note-windows";
 import { createLocalDataScope, putLocalMemo } from "@/lib/local-mirror";
+import { e2eeSession } from "@/lib/e2ee";
 import { updateMemoSummaryInLists } from "@/lib/memo-list-cache";
 import { EdgeEverPluginHost } from "@/lib/plugins/plugin-host";
 import { createRepository } from "@/lib/repository";
@@ -49,6 +50,13 @@ export const NoteWindowApp = ({ memoId }: { memoId: string }) => {
     () => createLocalDataScope(getPersistentDataScopeOrigin(window.location.origin), userId),
     [userId],
   );
+  useEffect(() => {
+    e2eeSession.setScope(localDataScope);
+    if (sessionQuery.data?.authenticated && !sessionQuery.data.demoMode) {
+      void e2eeSession.refreshKeyring(api.getE2eeKeyring).catch(() => undefined);
+    }
+  }, [localDataScope, sessionQuery.data?.authenticated, sessionQuery.data?.demoMode]);
+  useEffect(() => e2eeSession.attachBrowserListeners(), []);
   const repository = useMemo(() => createRepository(localDataScope), [localDataScope]);
   // Plugins are never activated here, so no plugin code runs twice.
   const pluginHost = useMemo(() => new EdgeEverPluginHost({

@@ -1,6 +1,6 @@
 import { useRef, useState, useEffect, type DragEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
-import { FileText, Component, GitFork, PieChart, Table2, Workflow, Star, Check, MoreHorizontal, RotateCcw, Trash2 } from "lucide-react";
+import { FileText, Component, GitFork, Lock, PieChart, Table2, Workflow, Star, Check, MoreHorizontal, RotateCcw, Trash2 } from "lucide-react";
 import { getMemoDisplayTitleWithCreatedAt, getMemoListTimestamp, type MemoSummary } from "@edgeever/shared";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
@@ -344,28 +344,32 @@ export const MemoCard = ({
     </time>
   );
   // Compact rows use two lines: title and date, then a one-line summary with tags.
-  const CompactTypeIcon = diagramLabel
-    ? DiagramIcon
-    : tableLabel
-      ? Table2
-      : memo.poster
-        ? FileText
-        : memo.infographic
-          ? PieChart
-          : null;
-  const compactSummary = diagramLabel
-    ? memo.diagramPreview
-      ? t("diagram.listCounts", { nodes: memo.diagramPreview.nodeCount, edges: memo.diagramPreview.edgeCount })
-      : diagramLabel
-    : tableLabel
-      ? memo.tablePreview
-        ? t("structuredTable.listCounts", { records: memo.tablePreview.recordCount, fields: memo.tablePreview.fieldCount })
-        : tableLabel
-      : memo.poster
-        ? t("poster.name")
-        : memo.infographic
-          ? t("infographic.name")
-          : memoExcerpt;
+  const CompactTypeIcon = memo.encrypted
+    ? Lock
+    : diagramLabel
+      ? DiagramIcon
+      : tableLabel
+        ? Table2
+        : memo.poster
+          ? FileText
+          : memo.infographic
+            ? PieChart
+            : null;
+  const compactSummary = memo.encrypted
+    ? t("e2ee.encryptedBadge")
+    : diagramLabel
+      ? memo.diagramPreview
+        ? t("diagram.listCounts", { nodes: memo.diagramPreview.nodeCount, edges: memo.diagramPreview.edgeCount })
+        : diagramLabel
+      : tableLabel
+        ? memo.tablePreview
+          ? t("structuredTable.listCounts", { records: memo.tablePreview.recordCount, fields: memo.tablePreview.fieldCount })
+          : tableLabel
+        : memo.poster
+          ? t("poster.name")
+          : memo.infographic
+            ? t("infographic.name")
+            : memoExcerpt;
   const compactBody = (
     <>
       <div className="flex min-w-0 items-center gap-1.5 text-[13.5px] font-semibold leading-5 tracking-[-0.012em] text-slate-950">
@@ -451,9 +455,24 @@ export const MemoCard = ({
           {compact ? compactBody : <>
           <div className="mb-1.5 flex min-w-0 items-center gap-1.5 text-[14px] font-semibold tracking-[-0.012em] leading-snug text-slate-950">
             {memo.isPinned && <Star className="h-4 w-4 shrink-0 fill-amber-400 text-amber-500" />}
+            {memo.encrypted && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="inline-flex shrink-0 items-center text-slate-500">
+                    <Lock className="h-3.5 w-3.5" aria-hidden="true" />
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent>{t("e2ee.encryptedBadge")}</TooltipContent>
+              </Tooltip>
+            )}
             <span className="min-w-0 truncate">{memoTitle}</span>
           </div>
-          {diagramLabel ? (
+          {memo.encrypted ? (
+            <div className="flex min-h-10 items-center gap-1.5 text-xs leading-relaxed text-slate-500">
+              <Lock className="h-3.5 w-3.5 shrink-0 text-slate-400" aria-hidden="true" />
+              <span className="truncate">{t("e2ee.encryptedCardHint")}</span>
+            </div>
+          ) : diagramLabel ? (
             <div className="space-y-1.5">
               <div className="flex flex-wrap items-center gap-1.5 text-xs text-slate-500">
                 <Tooltip>

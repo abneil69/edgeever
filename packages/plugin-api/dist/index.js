@@ -25,7 +25,7 @@ var PLUGIN_PERMISSIONS = [
   "ui:panels",
   "ui:embeds"
 ];
-var PLUGIN_API_ERROR_CODES = ["NOTE_CONFLICT", "RESOURCE_CONFLICT", "INVALID_MARKDOWN_EDIT", "STRUCTURED_NOTE_REQUIRED", "INVALID_STRUCTURED_EDIT", "NOTE_TYPE_MISMATCH", "TABLE_DATA_CHANGES_REQUIRED", "HOST_UPGRADE_REQUIRED"];
+var PLUGIN_API_ERROR_CODES = ["NOTE_CONFLICT", "RESOURCE_CONFLICT", "INVALID_MARKDOWN_EDIT", "STRUCTURED_NOTE_REQUIRED", "INVALID_STRUCTURED_EDIT", "NOTE_TYPE_MISMATCH", "TABLE_DATA_CHANGES_REQUIRED", "HOST_UPGRADE_REQUIRED", "ENCRYPTED_NOTE_FORBIDDEN"];
 var THEME_TOKEN_NAMES = [
   "color.background",
   "color.surface",
@@ -388,17 +388,17 @@ var normalizePluginSettings = (value) => {
     if (field.type === "select") {
       if (!Array.isArray(field.options) || field.options.length === 0 || field.options.length > 100)
         throw new Error(`Plugin setting ${field.key} requires between 1 and 100 select options.`);
-      const optionValues2 = new Set;
+      const optionValues = new Set;
       const options = field.options.map((option) => {
         if (!isRecord(option) || typeof option.value !== "string" || !option.value || typeof option.label !== "string" || !option.label.trim()) {
           throw new Error(`Plugin setting ${field.key} has an invalid select option.`);
         }
-        if (optionValues2.has(option.value))
+        if (optionValues.has(option.value))
           throw new Error(`Plugin setting ${field.key} has a duplicate select value.`);
-        optionValues2.add(option.value);
+        optionValues.add(option.value);
         return { value: option.value, label: option.label.trim() };
       });
-      if (field.default !== undefined && (typeof field.default !== "string" || !optionValues2.has(field.default)))
+      if (field.default !== undefined && (typeof field.default !== "string" || !optionValues.has(field.default)))
         throw new Error(`Plugin setting ${field.key} default must match a select option.`);
       return { ...common, type: "select", options, ...typeof field.default === "string" ? { default: field.default } : {} };
     }
@@ -639,18 +639,18 @@ var rememberMarketplaceRevocations = (existing, incoming) => {
   return [...byId.values()].sort((left, right) => left.id.localeCompare(right.id));
 };
 export {
-  rememberMarketplaceRevocations,
-  parseMarketplaceRegistry,
-  parseExtensionManifest,
-  normalizePluginPanelChrome,
-  mergeCommunityMarketplace,
-  isReservedMarketplacePluginId,
-  defineTheme,
-  definePlugin,
-  THEME_TOKEN_NAMES,
-  THEME_API_VERSION,
-  PLUGIN_PERMISSIONS,
-  PLUGIN_API_VERSION,
+  MARKETPLACE_REGISTRY_VERSION,
   PLUGIN_API_ERROR_CODES,
-  MARKETPLACE_REGISTRY_VERSION
+  PLUGIN_API_VERSION,
+  PLUGIN_PERMISSIONS,
+  THEME_API_VERSION,
+  THEME_TOKEN_NAMES,
+  definePlugin,
+  defineTheme,
+  isReservedMarketplacePluginId,
+  mergeCommunityMarketplace,
+  normalizePluginPanelChrome,
+  parseExtensionManifest,
+  parseMarketplaceRegistry,
+  rememberMarketplaceRevocations
 };

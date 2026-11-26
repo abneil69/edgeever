@@ -10,6 +10,7 @@ import { fetchEdgeEverApp } from "../../../api/src/index.ts";
 import { createSelfHostedStorageAdapter } from "../../../api/src/self-hosted-storage-adapter.ts";
 import { BackupManager } from "../main/backup-manager.mjs";
 import { createEdgeEverClient } from "../../../../packages/client/src/index.ts";
+import { decryptNoteContent, encryptNoteContent, initializeWorkspaceKeyring, unlockWorkspaceMasterKey } from "../../../../packages/shared/src/e2ee.ts";
 
 const cleanups = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
@@ -321,3 +322,63 @@ test("verify checks archives offline and rejects damaged files and wrong passwor
   await expect(truncated.next("done")).rejects.toMatchObject({ code: "invalidZip" });
   expect(await readdir(damagedStaging)).toEqual([]);
 }, 20000);
+
+test("background worker exports and restores E2EE keyring alongside encrypted notes across instances", async () => {
+  const source = await instance();
+  const initialized = await initializeWorkspaceKeyring({ passphrase: "desktop-worker-passphrase" });
+  await source.client.putE2eeKeyring(initialized.keyring);
+  const { notebook } = await source.client.createNotebook({ name: "Encrypted Vault" });
+  const { memo: created } = await source.client.createMemo({ notebookId: notebook.id, title: "Vault Entry", contentMarkdown: "" });
+  const encrypted = await encryptNoteContent({
+    memoId: created.id,
+    keyId: initialized.keyring.keyId,
+    masterKey: initialized.masterKey,
+    plaintextMarkdown: "# Top Secret\n\nDesktop worker backup roundtrip",
+  });
+  const { editSession } = await source.client.createMemoEditSession(created.id);
+  await source.client.updateMemo(created.id, {
+    title: "Vault Entry",
+    contentMarkdown: encrypted.markdown,
+    tags: ["vault"],
+    expectedRevision: created.revision,
+    expectedContentHash: created.contentHash,
+    editSessionId: editSession.id,
+  });
+
+  const archive = join(await directory(), "e2ee-backup.zip");
+  const exported = await launch({
+    operation: "export",
+    context: { baseUrl: source.baseUrl, accountId: null, token: "", locale: "en-US" },
+    path: archive,
+    version: { edgeeverVersion: "2.32.0", buildId: "e2ee-worker" },
+  });
+  const done = await exported.next("done");
+  expect(done.result.manifest.counts.memos).toBeGreaterThanOrEqual(1);
+
+  source.server.stop(true);
+  const target = await instance();
+  const restore = await launch({
+    operation: "import",
+    context: { baseUrl: target.baseUrl, accountId: null, token: "" },
+    path: archive,
+    stagingDirectory: await directory(),
+  });
+  await restore.next("ready");
+  restore.worker.postMessage({ type: "confirm" });
+  await restore.next("done");
+
+  const restoredKeyring = await target.client.getE2eeKeyring();
+  expect(restoredKeyring.configured).toBe(true);
+  expect(restoredKeyring.keyring?.keyId).toBe(initialized.keyring.keyId);
+  const restoredMasterKey = await unlockWorkspaceMasterKey({
+    passphrase: "desktop-worker-passphrase",
+    keyring: restoredKeyring.keyring,
+  });
+  const restoredMemo = await target.client.getMemo(created.id);
+  const decrypted = await decryptNoteContent({
+    memoId: created.id,
+    masterKey: restoredMasterKey,
+    envelopeOrMarkdown: restoredMemo.memo.contentMarkdown,
+  });
+  expect(decrypted.plaintextMarkdown).toBe("# Top Secret\n\nDesktop worker backup roundtrip");
+}, 30000);

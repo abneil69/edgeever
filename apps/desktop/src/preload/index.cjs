@@ -32,6 +32,27 @@ contextBridge.exposeInMainWorld("edgeeverDesktop", Object.freeze({
     if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
     return result.value;
   }),
+  e2eeBiometricStatus: () => ipcRenderer.invoke("desktop:e2ee-biometric-status").then((result) => {
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+    return result.value;
+  }),
+  e2eeBiometricEnable: (input) => ipcRenderer.invoke("desktop:e2ee-biometric-enable", input).then((result) => {
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+    return result.value;
+  }),
+  e2eeBiometricUnlock: (input) => ipcRenderer.invoke("desktop:e2ee-biometric-unlock", input).then((result) => {
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+    return result.value;
+  }),
+  e2eeBiometricDisable: () => ipcRenderer.invoke("desktop:e2ee-biometric-disable").then((result) => {
+    if (!result.ok) throw Object.assign(new Error(result.error.message), { code: result.error.code });
+    return result.value;
+  }),
+  onE2eeLock: (callback) => {
+    const listener = (_event, payload) => callback(payload);
+    ipcRenderer.on("desktop:e2ee-lock", listener);
+    return () => ipcRenderer.removeListener("desktop:e2ee-lock", listener);
+  },
   onBackupStatus: (callback) => {
     const listener = (_event, status) => callback(status);
     ipcRenderer.on("desktop:backup-status", listener);

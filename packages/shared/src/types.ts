@@ -5,7 +5,7 @@ import type { DiagramKind, DiagramSummaryPreview } from "./diagram";
 import type { TableSummaryPreview } from "./table";
 import type { TokenNotebookAccess, TokenNotebookAccessLevel } from "./schemas";
 
-export type NoteCreateKind = DiagramKind | "infographic" | "table" | "poster";
+export type NoteCreateKind = DiagramKind | "infographic" | "table" | "poster" | "encrypted";
 
 export type Notebook = {
   id: string;

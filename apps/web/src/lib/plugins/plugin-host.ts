@@ -34,7 +34,7 @@ import {
   type ThemeTokenName,
   type ThemeTokens,
 } from "@edgeever/plugin-api";
-import { markdownToDoc, projectLegacyTableDocument, type MemoDetail } from "@edgeever/shared";
+import { hasEncryptedNoteMarker, markdownToDoc, projectLegacyTableDocument, type MemoDetail } from "@edgeever/shared";
 import {
   structuredEditToken, pluginNoteKind, assertPluginMarkdownNote, assertStructuredRevision, pluginDiagram, pluginTable,
   translateStructuredError, applyDiagramOperations, applyTableOperations, diagramSemanticGraph,
@@ -168,6 +168,7 @@ export interface RegisteredPluginAction {
 }
 
 export interface PluginEditorAdapter {
+  isEncrypted?: () => boolean;
   getSelection(): PluginEditorSelection | null;
   getDocument(): PluginEditorDocument | null;
   replaceDocument(contentMarkdown: string): void;
@@ -223,17 +224,30 @@ interface ActivePlugin {
   disposers: Array<() => void>;
 }
 
-const toPluginNoteSummary = (note: Awaited<ReturnType<EdgeEverRepository["listMemos"]>>["memos"][number]): PluginNoteSummary => ({
-  kind: pluginNoteKind(note),
-  id: note.id,
-  notebookId: note.notebookId,
-  title: note.title,
-  excerpt: note.excerpt,
-  tags: [...note.tags],
-  isPinned: note.isPinned,
-  createdAt: note.createdAt,
-  updatedAt: note.updatedAt,
-});
+const isEncryptedPluginNote = (note: { encrypted?: boolean; contentMarkdown?: string | null } | null | undefined): boolean =>
+  Boolean(note && (note.encrypted === true || hasEncryptedNoteMarker(note.contentMarkdown)));
+
+const assertNotEncryptedNote = (note: { encrypted?: boolean; contentMarkdown?: string | null } | null | undefined) => {
+  if (isEncryptedPluginNote(note)) {
+    throw structuredApiError("ENCRYPTED_NOTE_FORBIDDEN", "Encrypted note content is not accessible to plugins.");
+  }
+};
+
+const toPluginNoteSummary = (note: Awaited<ReturnType<EdgeEverRepository["listMemos"]>>["memos"][number]): PluginNoteSummary => {
+  const encrypted = isEncryptedPluginNote(note);
+  return {
+    kind: pluginNoteKind(note),
+    id: note.id,
+    notebookId: note.notebookId,
+    title: note.title,
+    excerpt: encrypted ? "" : note.excerpt,
+    ...(encrypted ? { encrypted: true } : {}),
+    tags: [...note.tags],
+    isPinned: note.isPinned,
+    createdAt: note.createdAt,
+    updatedAt: note.updatedAt,
+  };
+};
 
 const toPluginNote = (note: Awaited<ReturnType<EdgeEverRepository["getMemo"]>>["memo"]): PluginNote => ({
   ...toPluginNoteSummary(note),
@@ -1101,12 +1115,34 @@ export class EdgeEverPluginHost {
       const active = this.editorAdapter?.getDocument();
       if (active?.noteId === noteId && active.hasUnsavedChanges) throw structuredApiError("NOTE_CONFLICT", "Save the active editor's changes before editing from a plugin.");
     };
+    const assertActiveEditorNotEncrypted = async () => {
+      const adapter = this.editorAdapter;
+      if (!adapter) return;
+      if (adapter.isEncrypted?.()) {
+        throw structuredApiError("ENCRYPTED_NOTE_FORBIDDEN", "Encrypted note content is not accessible to plugins.");
+      }
+      const document = adapter.getDocument();
+      if (!document) return;
+      assertNotEncryptedNote({ contentMarkdown: document.contentMarkdown });
+      if (document.noteId) {
+        const stored = (await this.repository.getMemo(document.noteId)).memo;
+        assertNotEncryptedNote(stored);
+      }
+    };
     const assertEditorMarkdown = async () => {
       const adapter = this.editorAdapter;
+      if (adapter?.isEncrypted?.()) {
+        throw structuredApiError("ENCRYPTED_NOTE_FORBIDDEN", "Encrypted note content is not accessible to plugins.");
+      }
       const document = adapter?.getDocument();
       if (!document) throw new Error("No note editor is currently active.");
+      assertNotEncryptedNote({ contentMarkdown: document.contentMarkdown });
       assertPluginMarkdownNote({ contentMarkdown: document.contentMarkdown });
-      if (document.noteId) assertPluginMarkdownNote((await this.repository.getMemo(document.noteId)).memo);
+      if (document.noteId) {
+        const stored = (await this.repository.getMemo(document.noteId)).memo;
+        assertNotEncryptedNote(stored);
+        assertPluginMarkdownNote(stored);
+      }
       const latest = this.editorAdapter?.getDocument();
       if (adapter !== this.editorAdapter || latest?.noteId !== document.noteId || latest?.contentMarkdown !== document.contentMarkdown) {
         throw structuredApiError("NOTE_CONFLICT", "The active editor changed while the plugin was preparing an edit.");
@@ -1188,17 +1224,21 @@ export class EdgeEverPluginHost {
             offset: Math.max(input.offset ?? 0, 0),
           });
           const summaries = result.memos.filter(
-            (note) => !input.tags?.length || input.tags.every((tag) => note.tags.includes(tag)),
+            (note) => !isEncryptedPluginNote(note) && (!input.tags?.length || input.tags.every((tag) => note.tags.includes(tag))),
           );
-          const notes = await Promise.all(summaries.map(async (note) =>
-            toPluginNote((await this.repository.getMemo(note.id)).memo)));
+          const fetched = await Promise.all(summaries.map(async (note) => (await this.repository.getMemo(note.id)).memo));
+          const notes = fetched
+            .filter((memo) => !isEncryptedPluginNote(memo))
+            .map(toPluginNote);
           const offset = Math.max(input.offset ?? 0, 0);
           if (result.totalCount === undefined) throw new Error("note_query_total_missing");
           return { notes, totalCount: result.totalCount, nextOffset: result.nextCursor ? offset + result.memos.length : null };
         },
         get: async (noteId) => {
           assertPermission(manifest, "notes:read");
-          return toPluginNote((await this.repository.getMemo(noteId)).memo);
+          const memo = (await this.repository.getMemo(noteId)).memo;
+          assertNotEncryptedNote(memo);
+          return toPluginNote(memo);
         },
         editMarkdown: async (noteId, input) => this.withNoteWrite(noteId, async () => {
           assertPermission(manifest, "notes:read");
@@ -1213,6 +1253,7 @@ export class EdgeEverPluginHost {
             throw createPluginApiError("INVALID_MARKDOWN_EDIT", "A valid expected revision and content hash are required.");
           }
           const current = (await this.repository.getMemo(noteId)).memo;
+          assertNotEncryptedNote(current);
           if (current.revision !== input.expectedRevision || current.contentHash !== input.expectedContentHash) {
             throw createPluginApiError("NOTE_CONFLICT", "The note changed after the plugin read it. Reload the note before editing.");
           }
@@ -1222,6 +1263,7 @@ export class EdgeEverPluginHost {
             throw createPluginApiError("NOTE_CONFLICT", "The note has unsaved editor changes. Save them before editing from a plugin.");
           }
           const contentMarkdown = applyPluginMarkdownEdits(current.contentMarkdown, input.edits);
+          assertNotEncryptedNote({ contentMarkdown });
           assertPluginMarkdownNote({ contentMarkdown });
           if (contentMarkdown === current.contentMarkdown) return toPluginNote(current);
           const updated = (await this.repository.updateMemo(current, {
@@ -1239,6 +1281,7 @@ export class EdgeEverPluginHost {
         }),
         create: async (input) => {
           assertPermission(manifest, "notes:write");
+          assertNotEncryptedNote({ contentMarkdown: input.contentMarkdown });
           assertPluginMarkdownNote({ contentMarkdown: input.contentMarkdown });
           const note = toPluginNote((await this.repository.createMemo(input)).memo);
           await this.onWorkspaceChanged?.();
@@ -1248,8 +1291,10 @@ export class EdgeEverPluginHost {
           assertPermission(manifest, "notes:write");
           assertPermission(manifest, "notes:read");
           const current = (await this.repository.getMemo(noteId)).memo;
+          assertNotEncryptedNote(current);
           assertSaved(noteId);
           if (input.contentMarkdown !== undefined) {
+            assertNotEncryptedNote({ contentMarkdown: input.contentMarkdown });
             assertPluginMarkdownNote(current);
             assertPluginMarkdownNote({ contentMarkdown: input.contentMarkdown });
           }
@@ -1287,18 +1332,36 @@ export class EdgeEverPluginHost {
         restore: async (noteId) => {
           assertPermission(manifest, "notes:write");
           assertPermission(manifest, "notes:read");
-          const note = toPluginNote((await this.repository.restoreMemo(noteId)).memo);
+          const restored = (await this.repository.restoreMemo(noteId)).memo;
           await this.onWorkspaceChanged?.();
-          return note;
+          if (isEncryptedPluginNote(restored)) {
+            return {
+              ...toPluginNoteSummary(restored),
+              contentJson: { type: "doc", content: [] },
+              revision: restored.revision,
+              contentMarkdown: "",
+              contentText: "",
+              contentHash: restored.contentHash,
+            };
+          }
+          return toPluginNote(restored);
         },
         revisions: {
           list: async (noteId) => {
             assertPermission(manifest, "notes:read");
-            return (await this.repository.listMemoRevisions(noteId)).revisions.map(toPluginRevision);
+            const current = (await this.repository.getMemo(noteId)).memo;
+            assertNotEncryptedNote(current);
+            const revisions = (await this.repository.listMemoRevisions(noteId)).revisions;
+            if (revisions.some((rev) => isEncryptedPluginNote(rev))) {
+              throw structuredApiError("ENCRYPTED_NOTE_FORBIDDEN", "Encrypted note revisions are not accessible to plugins.");
+            }
+            return revisions.map(toPluginRevision);
           },
           restore: async (noteId, revisionId) => {
             assertPermission(manifest, "notes:read");
             assertPermission(manifest, "notes:write");
+            const current = (await this.repository.getMemo(noteId)).memo;
+            assertNotEncryptedNote(current);
             const note = toPluginNote((await this.repository.restoreMemoRevision(noteId, revisionId)).memo);
             await this.onWorkspaceChanged?.();
             return note;
@@ -1576,10 +1639,12 @@ export class EdgeEverPluginHost {
       editor: {
         getSelection: async () => {
           assertPermission(manifest, "editor:read");
+          await assertActiveEditorNotEncrypted();
           return this.editorAdapter?.getSelection() ?? null;
         },
         getDocument: async () => {
           assertPermission(manifest, "editor:read");
+          await assertActiveEditorNotEncrypted();
           return this.editorAdapter?.getDocument() ?? null;
         },
         editMarkdown: async (edits) => {
@@ -1590,6 +1655,7 @@ export class EdgeEverPluginHost {
           const current = this.editorAdapter.getDocument();
           if (!current) throw new Error("No note editor is currently active.");
           const contentMarkdown = applyPluginMarkdownEdits(current.contentMarkdown, edits);
+          assertNotEncryptedNote({ contentMarkdown });
           assertPluginMarkdownNote({ contentMarkdown });
           if (contentMarkdown !== current.contentMarkdown) this.editorAdapter.replaceDocument(contentMarkdown);
           return { ...current, contentMarkdown, hasUnsavedChanges: contentMarkdown !== current.contentMarkdown || current.hasUnsavedChanges };
@@ -1642,6 +1708,7 @@ export class EdgeEverPluginHost {
           await assertEditorMarkdown();
           assertPermission(manifest, "editor:write");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
+          assertNotEncryptedNote({ contentMarkdown });
           assertPluginMarkdownNote({ contentMarkdown });
           this.editorAdapter.replaceSelection(contentMarkdown);
         },
@@ -1649,6 +1716,7 @@ export class EdgeEverPluginHost {
           await assertEditorMarkdown();
           assertPermission(manifest, "editor:write");
           if (!this.editorAdapter) throw new Error("No note editor is currently active.");
+          assertNotEncryptedNote({ contentMarkdown });
           assertPluginMarkdownNote({ contentMarkdown });
           this.editorAdapter.insertAtCursor(contentMarkdown);
         },
@@ -1747,7 +1815,10 @@ export class EdgeEverPluginHost {
           }
           const note = (await this.repository.getMemo(noteId)).memo;
           if (note.isDeleted) throw new Error("Deleted notes cannot be opened from a plugin.");
-          await this.navigationAdapter.openNote(note.id, note.notebookId, options?.search ? { search: options.search } : undefined);
+          const safeOptions = isEncryptedPluginNote(note)
+            ? undefined
+            : (options?.search ? { search: options.search } : undefined);
+          await this.navigationAdapter.openNote(note.id, note.notebookId, safeOptions);
         },
         panels: {
           register: (panel) => {

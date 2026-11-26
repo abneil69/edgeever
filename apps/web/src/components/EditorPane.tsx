@@ -96,6 +96,7 @@ import { insertUploadedResources } from "@/lib/resource-insertion";
 import {
   createSlashCommandExtension,
   type SlashCommandActions,
+  type SlashCommandId,
   type SlashCommandLabels,
 } from "./editor/SlashCommandMenu";
 import {
@@ -146,8 +147,14 @@ import {
   resolveResourceUploadMimeType,
   countMemoCharacters,
   createEdgeEverDocumentExtensions,
+  emptyDoc,
   getFrontMatterSource,
   getMappedNoteProperties,
+  hasDiagramDocumentMarker,
+  hasEncryptedNoteMarker,
+  hasInfographicDocumentMarker,
+  hasPosterDocumentMarker,
+  hasTableDocumentMarker,
   parseNoteProperties,
   splitMarkdownFrontMatter,
   updateNoteProperty,
@@ -190,7 +197,11 @@ import { copyResourceToClipboard, copyTextToClipboard } from "@/lib/clipboard";
 import { useNoteProseStylePreference } from "@/lib/note-prose-style-preference";
 import { updateMemoReadingStyle, useMemoReadingStyle } from "@/lib/memo-reading-style";
 import { createClientUuid } from "@/lib/client-id";
-import { isLocalMemoId, remapLocalDraftMemoId } from "@/lib/local-mirror";
+import { deleteLocalMemoRevisions, isLocalMemoId, remapLocalDraftMemoId } from "@/lib/local-mirror";
+import { e2eeSession, isEncryptedMemo, useE2eeSession } from "@/lib/e2ee";
+import { EncryptedNoteLockScreen } from "./e2ee/EncryptedNoteLockScreen";
+import { E2eeSetupDialog, E2eeUnlockDialog } from "./e2ee/E2eePassphraseDialogs";
+import { AppConfirmDialog } from "./dialogs/ConfirmDialogs";
 import { shouldAcceptRemoteMemoDetail } from "@/lib/memo-detail-freshness";
 import type { EdgeEverRepository } from "@/lib/repository";
 import {
@@ -402,19 +413,313 @@ type EditorPaneProps = {
 };
 
 type RichEditorPaneProps = EditorPaneProps & {
+  isEncryptedNote?: boolean;
+  onLockEncryptedNote?: () => void;
+  onRequestEncryptNote?: (snapshot: { title: string; contentMarkdown: string; tags: string[] }) => void;
+  onRequestDecryptNote?: (snapshot: { title: string; contentMarkdown: string; tags: string[] }) => void;
   onRequestMobileNativeEdit?: () => void;
 };
 
 export const EditorPane = (props: EditorPaneProps) => {
   const { t } = useTranslation();
+  const queryClient = useQueryClient();
+  const e2ee = useE2eeSession();
   const readOnly = props.isTrashView || Boolean(props.memo?.isDeleted);
+  const encrypted = isEncryptedMemo(props.memo);
+  const rawCipherMemoRef = useRef<MemoDetail | null>(encrypted ? props.memo : null);
+  if (encrypted && props.memo) {
+    rawCipherMemoRef.current = props.memo;
+  } else if (!encrypted) {
+    rawCipherMemoRef.current = null;
+  }
+
+  const [decryptedState, setDecryptedState] = useState<{
+    memoId: string;
+    cipherMarkdown: string;
+    plaintextMarkdown: string;
+  } | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [decryptAttempt, setDecryptAttempt] = useState(0);
+
+  const [e2eeNotice, setE2eeNotice] = useState<{ title: string; description: string } | null>(null);
+  const [pendingEncryptSnapshot, setPendingEncryptSnapshot] = useState<{ title: string; contentMarkdown: string; tags: string[] } | null>(null);
+  const [encryptConfirmOpen, setEncryptConfirmOpen] = useState(false);
+  const [decryptConfirmSnapshot, setDecryptConfirmSnapshot] = useState<{ title: string; contentMarkdown: string; tags: string[] } | null>(null);
+  const [e2eeSetupOpen, setE2eeSetupOpen] = useState(false);
+  const [e2eeUnlockOpen, setE2eeUnlockOpen] = useState(false);
+  const [e2eeConverting, setE2eeConverting] = useState(false);
+
+  useEffect(() => {
+    const target = props.memo;
+    if (!target || !encrypted || !e2ee.unlocked) {
+      setDecryptedState(null);
+      setDecrypting(false);
+      setDecryptError(null);
+      return;
+    }
+    if (
+      decryptedState
+      && decryptedState.memoId === target.id
+      && decryptedState.cipherMarkdown === target.contentMarkdown
+    ) {
+      setDecrypting(false);
+      setDecryptError(null);
+      return;
+    }
+    let cancelled = false;
+    setDecrypting(true);
+    setDecryptError(null);
+    void e2eeSession.decryptMemo(target.id, target.contentMarkdown)
+      .then((result) => {
+        if (cancelled) return;
+        setDecryptedState({
+          memoId: target.id,
+          cipherMarkdown: target.contentMarkdown,
+          plaintextMarkdown: result.plaintextMarkdown,
+        });
+        setDecrypting(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDecryptedState(null);
+        setDecrypting(false);
+        setDecryptError(t("e2ee.decryptFailed"));
+      });
+    return () => { cancelled = true; };
+  }, [decryptAttempt, decryptedState, e2ee.unlocked, encrypted, props.memo, t]);
+
+  const effectiveMemo = useMemo(() => {
+    if (!props.memo) return null;
+    if (!encrypted) return props.memo;
+    if (!e2ee.unlocked || !decryptedState || decryptedState.memoId !== props.memo.id) return null;
+    return {
+      ...props.memo,
+      contentMarkdown: decryptedState.plaintextMarkdown,
+      contentJson: markdownToDoc(decryptedState.plaintextMarkdown),
+      contentText: "",
+      excerpt: "",
+    };
+  }, [decryptedState, e2ee.unlocked, encrypted, props.memo]);
+
+  const effectiveRepository = useMemo<EdgeEverRepository>(() => {
+    if (!encrypted) return props.repository;
+    return {
+      ...props.repository,
+      updateMemo: async (memo, input, options) => {
+        if (!props.memo || memo.id !== props.memo.id) {
+          return props.repository.updateMemo(memo, input, options);
+        }
+        const baseCipher = rawCipherMemoRef.current?.id === memo.id ? rawCipherMemoRef.current : props.memo;
+        const plaintextMarkdown = input.contentMarkdown ?? docToMarkdown(input.contentJson);
+        const sealed = await e2eeSession.encryptMemo(
+          memo.id,
+          plaintextMarkdown,
+          baseCipher.contentMarkdown,
+        );
+        const saved = await props.repository.updateMemo(
+          baseCipher,
+          {
+            ...input,
+            expectedRevision: baseCipher.revision,
+            expectedContentHash: baseCipher.contentHash,
+            contentJson: emptyDoc(),
+            contentMarkdown: sealed.markdown,
+          },
+          options,
+        );
+        rawCipherMemoRef.current = saved.memo;
+        setDecryptedState({
+          memoId: saved.memo.id,
+          cipherMarkdown: saved.memo.contentMarkdown,
+          plaintextMarkdown,
+        });
+        return {
+          ...saved,
+          memo: {
+            ...saved.memo,
+            contentMarkdown: plaintextMarkdown,
+            contentJson: input.contentJson,
+            contentText: "",
+            excerpt: "",
+          },
+        };
+      },
+      adoptCloudMemo: async (memoId) => {
+        const result = await props.repository.adoptCloudMemo(memoId);
+        if (!hasEncryptedNoteMarker(result.memo.contentMarkdown)) {
+          return result;
+        }
+        rawCipherMemoRef.current = result.memo;
+        const decrypted = await e2eeSession.decryptMemo(result.memo.id, result.memo.contentMarkdown);
+        setDecryptedState({
+          memoId: result.memo.id,
+          cipherMarkdown: result.memo.contentMarkdown,
+          plaintextMarkdown: decrypted.plaintextMarkdown,
+        });
+        return {
+          ...result,
+          memo: {
+            ...result.memo,
+            contentMarkdown: decrypted.plaintextMarkdown,
+            contentJson: markdownToDoc(decrypted.plaintextMarkdown),
+            contentText: "",
+            excerpt: "",
+          },
+        };
+      },
+    };
+  }, [encrypted, props.memo, props.repository]);
+
+  const effectiveOnSaved = useCallback(async (savedMemo: MemoDetail) => {
+    if (hasEncryptedNoteMarker(savedMemo.contentMarkdown)) {
+      rawCipherMemoRef.current = savedMemo;
+      await props.onSaved(savedMemo);
+      return;
+    }
+    if (encrypted && rawCipherMemoRef.current?.id === savedMemo.id) {
+      await props.onSaved(rawCipherMemoRef.current);
+      return;
+    }
+    await props.onSaved(savedMemo);
+  }, [encrypted, props]);
+
+  const handleRequestEncryptNote = useCallback(async (snapshot: { title: string; contentMarkdown: string; tags: string[] }) => {
+    const target = props.memo;
+    if (!target || encrypted || readOnly) return;
+    if (props.demoMode) {
+      setE2eeNotice({ title: t("e2ee.encryptNoteAction"), description: t("e2ee.demoUnsupported") });
+      return;
+    }
+    if (
+      hasDiagramDocumentMarker(snapshot.contentMarkdown)
+      || hasTableDocumentMarker(snapshot.contentMarkdown)
+      || hasPosterDocumentMarker(snapshot.contentMarkdown)
+      || hasInfographicDocumentMarker(snapshot.contentMarkdown)
+    ) {
+      setE2eeNotice({ title: t("e2ee.encryptNoteAction"), description: t("e2ee.cannotEncryptStructured") });
+      return;
+    }
+    try {
+      const { resources } = await props.repository.listResources();
+      const hasAttachment = resources.some((resource) => resource.memoId === target.id && !resource.memoDeleted)
+        || /\/api\/v1\/resources\/|edgeever-staged:\/\//.test(snapshot.contentMarkdown);
+      if (hasAttachment) {
+        setE2eeNotice({ title: t("e2ee.encryptNoteAction"), description: t("e2ee.cannotEncryptAttachments") });
+        return;
+      }
+    } catch {
+      // Fall through; server and sidecar still enforce attachment exclusion atomically.
+    }
+    setPendingEncryptSnapshot(snapshot);
+    const session = e2eeSession.getSnapshot();
+    if (!session.configured) {
+      setE2eeSetupOpen(true);
+      return;
+    }
+    if (!session.unlocked) {
+      setE2eeUnlockOpen(true);
+      return;
+    }
+    setEncryptConfirmOpen(true);
+  }, [encrypted, props.demoMode, props.memo, props.repository, readOnly, t]);
+
+  const handleConfirmEncryptNote = useCallback(async () => {
+    const target = props.memo;
+    const snapshot = pendingEncryptSnapshot;
+    if (!target || !snapshot) return;
+    setE2eeConverting(true);
+    try {
+      const sealed = await e2eeSession.encryptMemo(target.id, snapshot.contentMarkdown);
+      const editSession = createLocalEditSession(target);
+      const saved = await props.repository.updateMemo(target, {
+        expectedRevision: target.revision,
+        expectedContentHash: target.contentHash,
+        editSessionId: editSession.id,
+        title: snapshot.title,
+        contentJson: emptyDoc(),
+        contentMarkdown: sealed.markdown,
+        tags: snapshot.tags,
+      });
+      await Promise.all([
+        deleteLocalMemoRevisions(props.localDataScope, target.id).catch(() => undefined),
+        localDb.drafts.delete(target.id).catch(() => undefined),
+      ]);
+      removeEmergencyDraft(target.id);
+      queryClient.removeQueries({ queryKey: ["memo-revisions", target.id] });
+      rawCipherMemoRef.current = saved.memo;
+      setDecryptedState({
+        memoId: saved.memo.id,
+        cipherMarkdown: saved.memo.contentMarkdown,
+        plaintextMarkdown: snapshot.contentMarkdown,
+      });
+      setEncryptConfirmOpen(false);
+      setPendingEncryptSnapshot(null);
+      await props.onSaved(saved.memo);
+    } catch (error) {
+      setEncryptConfirmOpen(false);
+      setPendingEncryptSnapshot(null);
+      setE2eeNotice({
+        title: t("e2ee.encryptNoteAction"),
+        description: error instanceof Error ? error.message : t("e2ee.cannotEncryptAttachments"),
+      });
+    } finally {
+      setE2eeConverting(false);
+    }
+  }, [pendingEncryptSnapshot, props, queryClient, t]);
+
+  const handleConfirmDecryptNote = useCallback(async () => {
+    const target = props.memo;
+    const snapshot = decryptConfirmSnapshot;
+    if (!target || !snapshot) return;
+    setE2eeConverting(true);
+    try {
+      const baseCipher = rawCipherMemoRef.current?.id === target.id ? rawCipherMemoRef.current : target;
+      const editSession = createLocalEditSession(baseCipher);
+      const saved = await props.repository.updateMemo(baseCipher, {
+        expectedRevision: baseCipher.revision,
+        expectedContentHash: baseCipher.contentHash,
+        editSessionId: editSession.id,
+        title: snapshot.title,
+        contentJson: markdownToDoc(snapshot.contentMarkdown),
+        contentMarkdown: snapshot.contentMarkdown,
+        tags: snapshot.tags,
+      });
+      e2eeSession.evictMemoDek(baseCipher.id);
+      rawCipherMemoRef.current = null;
+      setDecryptedState(null);
+      setDecryptConfirmSnapshot(null);
+      await props.onSaved(saved.memo);
+    } catch (error) {
+      setDecryptConfirmSnapshot(null);
+      setE2eeNotice({
+        title: t("e2ee.decryptNoteAction"),
+        description: error instanceof Error ? error.message : t("e2ee.decryptFailed"),
+      });
+    } finally {
+      setE2eeConverting(false);
+    }
+  }, [decryptConfirmSnapshot, props, t]);
+
   const { editingActive, requestEdit } = useStandaloneMobileEditor({
-    memoId: props.memo?.id ?? null,
-    mobileDefaultEditMemoId: props.mobileDefaultEditMemoId,
+    memoId: encrypted ? null : (props.memo?.id ?? null),
+    mobileDefaultEditMemoId: encrypted ? null : props.mobileDefaultEditMemoId,
     onBackToList: props.onBackToList,
     onDefaultEditConsumed: props.onMobileDefaultEditConsumed,
-    readOnly,
+    readOnly: readOnly || encrypted,
   });
+
+  if (encrypted && props.memo && (!e2ee.unlocked || !effectiveMemo)) {
+    return (
+      <EncryptedNoteLockScreen
+        memo={props.memo}
+        decrypting={e2ee.unlocked && decrypting}
+        decryptError={decryptError}
+        onBackToList={props.onBackToList}
+        onRetryDecrypt={() => setDecryptAttempt((count) => count + 1)}
+      />
+    );
+  }
 
   if (editingActive) {
     return (
@@ -425,11 +730,80 @@ export const EditorPane = (props: EditorPaneProps) => {
   }
 
   return (
-    <RichEditorPane
-      {...props}
-      mobileDefaultEditMemoId={props.mobileDefaultEditMemoId}
-      onRequestMobileNativeEdit={requestEdit}
-    />
+    <>
+      <RichEditorPane
+        {...props}
+        memo={effectiveMemo}
+        repository={effectiveRepository}
+        onSaved={effectiveOnSaved}
+        isEncryptedNote={encrypted}
+        onLockEncryptedNote={encrypted ? () => { void e2eeSession.lock("manual"); } : undefined}
+        onRequestEncryptNote={!encrypted && !readOnly && !props.demoMode ? (snapshot) => { void handleRequestEncryptNote(snapshot); } : undefined}
+        onRequestDecryptNote={encrypted && !readOnly ? (snapshot) => setDecryptConfirmSnapshot(snapshot) : undefined}
+        mobileDefaultEditMemoId={encrypted ? null : props.mobileDefaultEditMemoId}
+        onRequestMobileNativeEdit={encrypted ? undefined : requestEdit}
+      />
+
+      {encryptConfirmOpen && (
+        <AppConfirmDialog
+          title={t("e2ee.encryptConfirmTitle")}
+          description={t("e2ee.encryptConfirmDescription")}
+          confirmLabel={t("e2ee.encryptConfirmButton")}
+          isWorking={e2eeConverting}
+          tone="danger"
+          onCancel={() => {
+            setEncryptConfirmOpen(false);
+            setPendingEncryptSnapshot(null);
+          }}
+          onConfirm={() => void handleConfirmEncryptNote()}
+        />
+      )}
+
+      {decryptConfirmSnapshot && (
+        <AppConfirmDialog
+          title={t("e2ee.decryptConfirmTitle")}
+          description={t("e2ee.decryptConfirmDescription")}
+          confirmLabel={t("e2ee.decryptConfirmButton")}
+          isWorking={e2eeConverting}
+          tone="primary"
+          onCancel={() => setDecryptConfirmSnapshot(null)}
+          onConfirm={() => void handleConfirmDecryptNote()}
+        />
+      )}
+
+      {e2eeNotice && (
+        <AppConfirmDialog
+          title={e2eeNotice.title}
+          description={e2eeNotice.description}
+          confirmLabel={t("common.close")}
+          hideCancel
+          tone="neutral"
+          onCancel={() => setE2eeNotice(null)}
+          onConfirm={() => setE2eeNotice(null)}
+        />
+      )}
+
+      <E2eeSetupDialog
+        open={e2eeSetupOpen}
+        onOpenChange={(open) => {
+          setE2eeSetupOpen(open);
+          if (!open && !e2eeSession.getSnapshot().unlocked) setPendingEncryptSnapshot(null);
+        }}
+        onConfigured={() => {
+          if (pendingEncryptSnapshot) setEncryptConfirmOpen(true);
+        }}
+      />
+      <E2eeUnlockDialog
+        open={e2eeUnlockOpen}
+        onOpenChange={(open) => {
+          setE2eeUnlockOpen(open);
+          if (!open && !e2eeSession.getSnapshot().unlocked) setPendingEncryptSnapshot(null);
+        }}
+        onUnlocked={() => {
+          if (pendingEncryptSnapshot) setEncryptConfirmOpen(true);
+        }}
+      />
+    </>
   );
 };
 const RichEditorPane = ({
@@ -483,6 +857,10 @@ const RichEditorPane = ({
   pluginNavigationRequest,
   onOpenExecutionCenter,
   demoMode = false,
+  isEncryptedNote = false,
+  onLockEncryptedNote,
+  onRequestEncryptNote,
+  onRequestDecryptNote,
   onRequestMobileNativeEdit,
 }: RichEditorPaneProps) => {
   const { t, i18n } = useTranslation();
@@ -687,7 +1065,9 @@ const RichEditorPane = ({
   const notebookOptions = useMemo(() => getNotebookMoveOptions(notebooks), [notebooks]);
   const notebookName = notebookOptions.find((notebook) => notebook.id === memo?.notebookId)?.name;
   const readOnly = isTrashView || Boolean(memo?.isDeleted);
-  const shareMemoId = memo && !readOnly && !isLocalMemoId(memo.id) ? memo.id : null;
+  const isEncryptedNoteRef = useRef(isEncryptedNote);
+  isEncryptedNoteRef.current = isEncryptedNote;
+  const shareMemoId = memo && !readOnly && !isEncryptedNote && !isLocalMemoId(memo.id) ? memo.id : null;
   const shareStatusQuery = useQuery({
     queryKey: memoShareQueryKey(shareMemoId ?? ""),
     queryFn: () => {
@@ -844,17 +1224,25 @@ const RichEditorPane = ({
   const slashCommandActionsRef = useRef<SlashCommandActions | null>(null);
   if (!slashCommandActionsRef.current) {
     slashCommandActionsRef.current = {
-      openAi: () => openAiAssistantRef.current(),
-      openAttachmentPicker: () => fileInputRef.current?.click(),
+      openAi: () => {
+        if (isEncryptedNoteRef.current) return;
+        openAiAssistantRef.current();
+      },
+      openAttachmentPicker: () => {
+        if (isEncryptedNoteRef.current) return;
+        fileInputRef.current?.click();
+      },
       openExternalLinkPicker: () => openExternalLinkDialogRef.current(),
       openNoteLinkPicker: () => setNoteLinkPickerOpen(true),
       openMathFormula: (kind, range) => openMathFormulaRef.current(kind, range),
     };
   }
+  const encryptedDisabledSlashCommandsRef = useRef<ReadonlySet<SlashCommandId>>(new Set(["ai", "attachment"]));
   const slashCommandExtensionRef = useRef<ReturnType<typeof createSlashCommandExtension> | null>(null);
   if (!slashCommandExtensionRef.current) {
     slashCommandExtensionRef.current = createSlashCommandExtension({
       actions: slashCommandActionsRef.current,
+      getDisabledIds: () => (isEncryptedNoteRef.current ? encryptedDisabledSlashCommandsRef.current : new Set()),
       getLabels: () => slashCommandLabelsRef.current,
     });
   }
@@ -1121,7 +1509,14 @@ const RichEditorPane = ({
     const currentMemo = memoRef.current;
     const currentEditor = editorRef.current;
 
-    if (!currentMemo || currentMemo.isDeleted || !currentEditor || !currentEditor.isEditable || files.length === 0) {
+    if (
+      isEncryptedNoteRef.current ||
+      !currentMemo ||
+      currentMemo.isDeleted ||
+      !currentEditor ||
+      !currentEditor.isEditable ||
+      files.length === 0
+    ) {
       return false;
     }
 
@@ -1385,7 +1780,7 @@ const RichEditorPane = ({
           return true;
         }
 
-        if (aiSpaceShortcutEnabledRef.current && shouldOpenAiFromSpace({
+        if (!isEncryptedNoteRef.current && aiSpaceShortcutEnabledRef.current && shouldOpenAiFromSpace({
           altKey: event.altKey,
           ctrlKey: event.ctrlKey,
           isComposing: event.isComposing,
@@ -1419,6 +1814,11 @@ const RichEditorPane = ({
           return false;
         }
 
+        if (isEncryptedNoteRef.current) {
+          event.preventDefault();
+          return true;
+        }
+
         const { from, to } = selection;
         if (from === to) {
           return false;
@@ -1434,6 +1834,7 @@ const RichEditorPane = ({
         return true;
       },
       handleTextInput: (view, from, to, text) => {
+        if (isEncryptedNoteRef.current) return false;
         if (from !== to) return false;
         const resolved = view.state.doc.resolve(from);
         if (resolved.parent.type.name !== "paragraph") return false;
@@ -1492,10 +1893,21 @@ const RichEditorPane = ({
         }
 
         event.preventDefault();
+        if (isEncryptedNoteRef.current) return true;
         insertResourceFiles(files);
         return true;
       },
-      handleDrop: (view, event) => handleResourceFileDrop(view, event, insertResourceFiles),
+      handleDrop: (view, event) => {
+        if (isEncryptedNoteRef.current) {
+          const files = getResourceFilesFromDataTransfer(event.dataTransfer);
+          if (files.length > 0) {
+            event.preventDefault();
+            return true;
+          }
+          return false;
+        }
+        return handleResourceFileDrop(view, event, insertResourceFiles);
+      },
     },
   }, [
     // Keep one TipTap view for the pane lifetime. A newly created memo already
@@ -1565,7 +1977,7 @@ const RichEditorPane = ({
 
   const uploadMarkdownPasteFiles = useCallback(async (files: File[]) => {
     const targetMemoId = memoRef.current?.id;
-    if (!targetMemoId || effectiveReadOnly) return "";
+    if (!targetMemoId || effectiveReadOnly || isEncryptedNoteRef.current) return "";
     setImageUploadState("uploading");
     const results = await processFileUploadBatch(files, async (file) => {
       const shouldCompress = SUPPORTED_PASTE_IMAGE_TYPES.has(resolveResourceUploadMimeType(file.name, file.type)) && imageCompressionEnabledRef.current;
@@ -2126,6 +2538,7 @@ const RichEditorPane = ({
     setQuery: setNoteSearchQuery,
     setReplacement: setNoteSearchReplacement,
   } = useEditorNoteSearchController({
+    disabled: isEncryptedNote,
     markdownMode: useMarkdownSourceEditor,
     markdownSource,
     markdownSourceEditorRef,
@@ -2144,7 +2557,8 @@ const RichEditorPane = ({
 
   useEffect(() => {
     if (
-      !pluginNavigationRequest
+      isEncryptedNote
+      || !pluginNavigationRequest
       || !memo
       || pluginNavigationRequest.id === handledPluginNavigationRequestRef.current
       || pluginNavigationRequest.noteId !== memo.id
@@ -2153,7 +2567,7 @@ const RichEditorPane = ({
     ) return;
     handledPluginNavigationRequestRef.current = pluginNavigationRequest.id;
     openNoteSearchWithQuery(pluginNavigationRequest.search);
-  }, [editor, hydratedEditorMemoId, memo?.id, openNoteSearchWithQuery, pluginNavigationRequest]);
+  }, [editor, hydratedEditorMemoId, isEncryptedNote, memo?.id, openNoteSearchWithQuery, pluginNavigationRequest]);
 
   useEffect(() => {
     if (!isEditorReady(editor)) {
@@ -2181,6 +2595,7 @@ const RichEditorPane = ({
       const currentEditor = editorRef.current;
 
       if (
+        isEncryptedNote ||
         !currentMemo ||
         currentMemo.isDeleted ||
         !getWritableEditorMemoFields(memoFieldsRef.current, currentMemo.id, hydratedMemoIdRef.current, hydratingRef.current) ||
@@ -2205,7 +2620,7 @@ const RichEditorPane = ({
         updatedAt: new Date().toISOString(),
       });
     },
-    [getMobilePlainTextValue, markdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]
+    [getMobilePlainTextValue, isEncryptedNote, markdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]
   );
   persistResourceInsertionDraftRef.current = () => persistCurrentDraft();
 
@@ -2232,9 +2647,9 @@ const RichEditorPane = ({
   }, [editor, getMobilePlainTextValue, markdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
   const openAiAssistant = useCallback(() => {
-    if (effectiveReadOnly) return;
+    if (effectiveReadOnly || isEncryptedNote) return;
     setAiSidebarOpen(true);
-  }, [effectiveReadOnly, setAiSidebarOpen]);
+  }, [effectiveReadOnly, isEncryptedNote, setAiSidebarOpen]);
 
   useEffect(() => {
     openAiAssistantRef.current = openAiAssistant;
@@ -2249,7 +2664,7 @@ const RichEditorPane = ({
   }, [memo?.id]);
 
   const requestSelectionAi = useCallback((kind: SelectionAiRequest["kind"]) => {
-    if (effectiveReadOnly || useMobilePlainTextEditor) return;
+    if (effectiveReadOnly || useMobilePlainTextEditor || isEncryptedNote) return;
     const currentMemo = memoRef.current;
     if (!currentMemo) return;
     let pin: SelectionAiPin | null = null;
@@ -2296,7 +2711,7 @@ const RichEditorPane = ({
     setSelectionPin(pin);
     setSelectionRequest({ id: createClientUuid(), kind });
     setAiSidebarOpen(true);
-  }, [editor, effectiveReadOnly, setAiSidebarOpen, useMarkdownSourceEditor, useMobilePlainTextEditor]);
+  }, [editor, effectiveReadOnly, isEncryptedNote, setAiSidebarOpen, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
   const replacePinnedSelection = useCallback((replacement: string) => {
     const pin = selectionPinRef.current;
@@ -2335,7 +2750,7 @@ const RichEditorPane = ({
    * while the text at it is unchanged; the sidebar asks the user before using a new target.
    */
   const aiDraftEditor = useMemo<AiDraftEditorApi | null>(() => {
-    if (effectiveReadOnly || useMobilePlainTextEditor) return null;
+    if (effectiveReadOnly || useMobilePlainTextEditor || isEncryptedNote) return null;
     const richSnapshotIsCurrent = (snapshot: AiDraftSelectionSnapshot) => {
       const currentEditor = editorRef.current;
       if (!isEditorReady(currentEditor)) return false;
@@ -2419,10 +2834,10 @@ const RichEditorPane = ({
         };
       },
     };
-  }, [effectiveReadOnly, getCurrentMarkdownForAi, markDirty, setMarkdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]);
+  }, [effectiveReadOnly, getCurrentMarkdownForAi, isEncryptedNote, markDirty, setMarkdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
   const syncMarkdownAiMenu = useCallback(() => {
-    if (!useMarkdownSourceEditor || effectiveReadOnly || useMobilePlainTextEditor || !readAiSelectionMenuPreference()) {
+    if (isEncryptedNote || !useMarkdownSourceEditor || effectiveReadOnly || useMobilePlainTextEditor || !readAiSelectionMenuPreference()) {
       setMarkdownAiMenu((current) => current ? null : current);
       return;
     }
@@ -2455,7 +2870,7 @@ const RichEditorPane = ({
         ? current
         : next
     ));
-  }, [effectiveReadOnly, useMarkdownSourceEditor, useMobilePlainTextEditor]);
+  }, [effectiveReadOnly, isEncryptedNote, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
   useEffect(() => {
     if (!useMarkdownSourceEditor) {
@@ -2531,7 +2946,7 @@ const RichEditorPane = ({
     const handleLocalDatabaseInterrupted = () => {
       const currentMemo = memoRef.current;
       const contentJson = getCurrentContentJson();
-      if (currentMemo && contentJson && !currentMemo.isDeleted &&
+      if (!isEncryptedNote && currentMemo && contentJson && !currentMemo.isDeleted &&
         getWritableEditorMemoFields(memoFields, currentMemo.id, hydratedMemoIdRef.current, hydratingRef.current)) {
         persistEmergencyDraft({
           memoId: currentMemo.id,
@@ -2550,7 +2965,7 @@ const RichEditorPane = ({
 
     window.addEventListener(LOCAL_DATABASE_INTERRUPTED_EVENT, handleLocalDatabaseInterrupted);
     return () => window.removeEventListener(LOCAL_DATABASE_INTERRUPTED_EVENT, handleLocalDatabaseInterrupted);
-  }, [getCurrentContentJson, memoFields, setHasUnsavedChanges, setSaveConflictInfo, setSaveState, tagsText, title]);
+  }, [getCurrentContentJson, isEncryptedNote, memoFields, setHasUnsavedChanges, setSaveConflictInfo, setSaveState, tagsText, title]);
 
   useEffect(() => {
     const currentEditor = editorRef.current;
@@ -2660,13 +3075,15 @@ const RichEditorPane = ({
     memoRef.current = memo;
 
     void (async () => {
-      let [indexedDbDraft, queuedUpdate] = memo.isDeleted
+      let [indexedDbDraft, queuedUpdate] = memo.isDeleted || isEncryptedNote
         ? [null, null]
         : await Promise.all([
             localDb.drafts.get(memo.id),
             localDb.syncQueue.get(getMemoUpdateQueueId(memo.id)),
           ]);
-      let draft = selectNewestLocalDraft(indexedDbDraft, readEmergencyDraft(memo.id));
+      let draft = isEncryptedNote
+        ? null
+        : selectNewestLocalDraft(indexedDbDraft, readEmergencyDraft(memo.id));
 
       if (cancelled) {
         return;
@@ -3074,7 +3491,7 @@ const RichEditorPane = ({
     wechatCopyState,
     wechatCopyError,
   } = useEditorDocumentActions({
-    canShareMemo: Boolean(memo && !readOnly),
+    canShareMemo: Boolean(memo && !readOnly && !isEncryptedNote),
     documentActionRequest,
     editor,
     effectiveReadOnly,
@@ -3170,14 +3587,16 @@ const RichEditorPane = ({
         contentMarkdown: useMarkdownSourceEditor ? markdownSource : undefined,
         tags: parseTagsText(writableFields.tagsText),
       };
-      persistEmergencyDraft({
-        memoId: currentMemo.id,
-        expectedRevision: currentMemo.revision,
-        title: writableFields.title,
-        tagsText: writableFields.tagsText,
-        contentJson,
-        updatedAt: new Date().toISOString(),
-      });
+      if (!isEncryptedNote) {
+        persistEmergencyDraft({
+          memoId: currentMemo.id,
+          expectedRevision: currentMemo.revision,
+          title: writableFields.title,
+          tagsText: writableFields.tagsText,
+          contentJson,
+          updatedAt: new Date().toISOString(),
+        });
+      }
       const { memo: localMemo } = await repository.updateMemo(currentMemo, payload);
       return { memo: localMemo, snapshot, queued: true };
     },
@@ -3254,6 +3673,12 @@ const RichEditorPane = ({
       }
 
       if (failure.kind === "queue") {
+        if (isEncryptedNote) {
+          setSaveConflictInfo(null);
+          setSaveErrorReasonKey(null);
+          setSaveState("error");
+          return;
+        }
         await queueMemoUpdate(failure.payload);
         await localDb.drafts.put({
           memoId: failure.payload.memoId,
@@ -3283,7 +3708,9 @@ const RichEditorPane = ({
     }
 
     const adapter: PluginEditorAdapter = {
+      isEncrypted: () => isEncryptedNote,
       getSelection: () => {
+        if (isEncryptedNote) return null;
         const { selection, doc } = editor.state;
         const context = getRichTextAiSelectionContext(doc, selection);
         return {
@@ -3295,19 +3722,24 @@ const RichEditorPane = ({
           contentMarkdown: context?.contentMarkdown ?? "",
         };
       },
-      getDocument: () => ({
-        noteId: pluginEditorMemoId,
-        contentMarkdown: isMarkdownMode
-          ? markdownSource
-          : docToMarkdown(editor.getJSON() as TiptapDoc),
-        hasUnsavedChanges: hasUnsavedChanges || saveMutation.isPending,
-      }),
+      getDocument: () => {
+        if (isEncryptedNote) return null;
+        return {
+          noteId: pluginEditorMemoId,
+          contentMarkdown: isMarkdownMode
+            ? markdownSource
+            : docToMarkdown(editor.getJSON() as TiptapDoc),
+          hasUnsavedChanges: hasUnsavedChanges || saveMutation.isPending,
+        };
+      },
       replaceDocument: (contentMarkdown) => {
+        if (isEncryptedNote) return;
         if (isMarkdownMode) setMarkdownSource(contentMarkdown);
         else editor.commands.setContent(markdownToDoc(contentMarkdown));
         markDirty();
       },
       insertEmbed: (embed) => {
+        if (isEncryptedNote) return;
         const attributes = {
           id: embed.id,
           pluginId: embed.pluginId,
@@ -3325,18 +3757,20 @@ const RichEditorPane = ({
         markDirty();
       },
       replaceSelection: (contentMarkdown) => {
+        if (isEncryptedNote) return;
         const { selection, doc } = editor.state;
         const context = getRichTextAiSelectionContext(doc, selection);
         const content = getRichTextAiSelectionReplacement(contentMarkdown, context?.isInline ?? true);
         editor.chain().focus().insertContentAt({ from: selection.from, to: selection.to }, content).run();
       },
       insertAtCursor: (contentMarkdown) => {
+        if (isEncryptedNote) return;
         const content = getRichTextAiSelectionReplacement(contentMarkdown, true);
         editor.chain().focus().insertContent(content).run();
       },
     };
     return pluginHost.setEditorAdapter(adapter);
-  }, [editor, effectiveReadOnly, hasUnsavedChanges, hydratedEditorMemoId, isMarkdownMode, markdownSource, markDirty, pluginEditorMemoId, pluginHost, saveMutation.isPending]);
+  }, [editor, effectiveReadOnly, hasUnsavedChanges, hydratedEditorMemoId, isEncryptedNote, isMarkdownMode, markdownSource, markDirty, pluginEditorMemoId, pluginHost, saveMutation.isPending]);
   // useMutation returns a new result object on every render. Depending on the
   // whole object makes autosave timers restart during unrelated renders and
   // can starve a recovered draft indefinitely. These members are stable (or
@@ -3380,6 +3814,13 @@ const RichEditorPane = ({
     return () => onRegisterPendingSave(null);
   }, [onRegisterPendingSave]);
 
+  useEffect(() => {
+    if (!isEncryptedNote) return;
+    return e2eeSession.registerBeforeLockFlush(async () => {
+      await savePendingEditsRef.current();
+    });
+  }, [isEncryptedNote]);
+
   const editorShortcutBlocked = Boolean(
     historyOpen ||
       shareOpen ||
@@ -3393,9 +3834,9 @@ const RichEditorPane = ({
   useEffect(() => {
     if (handledAiAssistantOpenTokenRef.current === aiAssistantOpenToken) return;
     handledAiAssistantOpenTokenRef.current = aiAssistantOpenToken;
-    if (editorShortcutBlocked || effectiveReadOnly || !memoRef.current) return;
+    if (editorShortcutBlocked || effectiveReadOnly || isEncryptedNote || !memoRef.current) return;
     openAiAssistant();
-  }, [aiAssistantOpenToken, editorShortcutBlocked, effectiveReadOnly, openAiAssistant]);
+  }, [aiAssistantOpenToken, editorShortcutBlocked, effectiveReadOnly, isEncryptedNote, openAiAssistant]);
 
   useEffect(() => {
     if (handledReadingProtectionToggleTokenRef.current === readingProtectionToggleToken) return;
@@ -3543,7 +3984,7 @@ const RichEditorPane = ({
 
   const handleResourceTranscribe = useCallback(async (target: ResourceMenuTarget) => {
     const currentMemoId = memoRef.current?.id;
-    if (!currentMemoId || target.kind !== "attachment" || !target.resourceId) return;
+    if (isEncryptedNote || !currentMemoId || target.kind !== "attachment" || !target.resourceId) return;
     attachmentTranscriptAbortRef.current?.abort();
     const controller = new AbortController();
     attachmentTranscriptAbortRef.current = controller;
@@ -3590,7 +4031,7 @@ const RichEditorPane = ({
     } finally {
       if (attachmentTranscriptAbortRef.current === controller) attachmentTranscriptAbortRef.current = null;
     }
-  }, [hideResourceMenu, t]);
+  }, [hideResourceMenu, isEncryptedNote, t]);
 
   const dismissAttachmentTranscript = useCallback(() => {
     attachmentTranscriptAbortRef.current?.abort();
@@ -4040,7 +4481,17 @@ const RichEditorPane = ({
         notebookId,
       })
       .then(async (data) => {
-        if (memoRef.current?.id === data.memo.id) memoRef.current = data.memo;
+        if (memoRef.current?.id === data.memo.id) {
+          memoRef.current = isEncryptedNote
+            ? {
+                ...data.memo,
+                contentMarkdown: memoRef.current.contentMarkdown,
+                contentJson: memoRef.current.contentJson,
+                contentText: "",
+                excerpt: "",
+              }
+            : data.memo;
+        }
         await onSaved(data.memo);
         if (memoRef.current?.id !== data.memo.id) return;
         setSaveState("saved");
@@ -4274,7 +4725,8 @@ const RichEditorPane = ({
           />
           <MemoEditorMetadataRow
             rowClassName={MEMO_EDITOR_METADATA_ROW_CLASS_NAME}
-            contentMarkdown={currentMarkdownForAi}
+            aiTagSuggestionDisabled={isEncryptedNote}
+            contentMarkdown={isEncryptedNote ? "" : currentMarkdownForAi}
             disabled={effectiveReadOnly}
             mobileNotebookPickerOpen={mobileNotebookSheetOpen}
             notebookOptions={notebookOptions}
@@ -4296,6 +4748,21 @@ const RichEditorPane = ({
             }}
             trailingActions={(
               <>
+                {isEncryptedNote && onLockEncryptedNote && (
+                  <IconTooltip label={t("e2ee.lockNowButton")}>
+                    <Button
+                      className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-50 px-2 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/60 dark:hover:bg-amber-950/70"
+                      size="sm"
+                      variant="ghost"
+                      type="button"
+                      aria-label={t("e2ee.lockNowButton")}
+                      onClick={onLockEncryptedNote}
+                    >
+                      <Lock className="h-3 w-3" aria-hidden="true" />
+                      <span className="hidden sm:inline">{t("e2ee.encryptedBadge")}</span>
+                    </Button>
+                  </IconTooltip>
+                )}
                 {!readOnly && (
                   <IconTooltip label={`${t(desktopReadingProtection ? "editor.disableReadingProtection" : "editor.enableReadingProtection")} (${formatShortcutBinding(shortcutSettings.toggleReadingProtection)})`}>
                     <Button
@@ -4466,7 +4933,7 @@ const RichEditorPane = ({
               desktopFocusMode={desktopFocusMode}
               onToggleDesktopFocusMode={onToggleDesktopFocusMode}
             />
-            {!readOnly && editorColumnWidth >= 960 && (!mobileEditingActive || isMemoShared) && (
+            {!readOnly && !isEncryptedNote && editorColumnWidth >= 960 && (!mobileEditingActive || isMemoShared) && (
               <IconTooltip label={t(isLocalMemoId(memo.id) ? "sharing.afterSync" : isMemoShared ? "sharing.manage" : "sharing.action")}>
                 <Button
                   className="h-8 w-8 text-slate-500"
@@ -4503,7 +4970,7 @@ const RichEditorPane = ({
                 insertResourceFiles(files);
               }}
             />
-            {mobileEditingActive && !readOnly && !useMobilePlainTextEditor && (
+            {mobileEditingActive && !readOnly && !isEncryptedNote && !useMobilePlainTextEditor && (
               <Button
                 className="sm:hidden"
                 size="icon"
@@ -4534,10 +5001,10 @@ const RichEditorPane = ({
               moreButtonClassName={cn(!mobileEditingActive && !readOnly && "hidden sm:inline-flex")}
               moreMenuClassName="w-56 rounded-md"
               onOpenExecutionCenter={onOpenExecutionCenter}
-              onSearch={() => openNoteSearch()}
+              onSearch={isEncryptedNote ? undefined : () => openNoteSearch()}
               textNoteMenuItems={(
                 <>
-                  {onCreatePoster && !effectiveReadOnly && <DropdownMenuItem disabled={!memo || saveMutation.isPending} onSelect={() => {
+                  {!isEncryptedNote && onCreatePoster && !effectiveReadOnly && <DropdownMenuItem disabled={!memo || saveMutation.isPending} onSelect={() => {
                     const selection = editor?.state.selection;
                     const text = selection && !selection.empty ? editor?.state.doc.textBetween(selection.from, selection.to, "\n") ?? "" : editor?.getText() ?? memo?.contentText ?? "";
                     void (async () => { if (!memo) return; if (hasUnsavedChangesRef.current) await saveMutation.mutateAsync(); await onCreatePoster(memoRef.current ?? memo, text); })().catch(() => setSaveState("error"));
@@ -4551,28 +5018,30 @@ const RichEditorPane = ({
                       {phonePreviewOpen ? t("editor.hidePhonePreview") : t("editor.showPhonePreview")}
                     </DropdownMenuItem>
                   )}
-                  <IconTooltip
-                    side="left"
-                    contentClassName="z-[110] max-w-xs whitespace-normal"
-                    label={t("editor.copyToWeChatTooltip")}
-                  >
-                    <DropdownMenuItem
-                      className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                      disabled={!editor || useMobilePlainTextEditor || wechatCopyState === "copying"}
-                      onClick={() => void handleCopyToWeChat()}
+                  {!isEncryptedNote && (
+                    <IconTooltip
+                      side="left"
+                      contentClassName="z-[110] max-w-xs whitespace-normal"
+                      label={t("editor.copyToWeChatTooltip")}
                     >
-                      {wechatCopyState === "copying" ? (
-                        <LoaderCircle className="h-4 w-4 animate-spin text-slate-500" />
-                      ) : wechatCopyState === "copied" ? (
-                        <Check className="h-4 w-4 text-slate-500" />
-                      ) : wechatCopyState === "error" ? (
-                        <CircleAlert className="h-4 w-4 text-rose-600" />
-                      ) : (
-                        <ClipboardType className="h-4 w-4 text-slate-500" />
-                      )}
-                      {t(wechatCopyState === "copying" ? "editor.copyingToWeChat" : wechatCopyState === "copied" ? "editor.copiedToWeChat" : wechatCopyState === "error" ? "editor.copyToWeChatFailed" : "editor.copyToWeChat")}
-                    </DropdownMenuItem>
-                  </IconTooltip>
+                      <DropdownMenuItem
+                        className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                        disabled={!editor || useMobilePlainTextEditor || wechatCopyState === "copying"}
+                        onClick={() => void handleCopyToWeChat()}
+                      >
+                        {wechatCopyState === "copying" ? (
+                          <LoaderCircle className="h-4 w-4 animate-spin text-slate-500" />
+                        ) : wechatCopyState === "copied" ? (
+                          <Check className="h-4 w-4 text-slate-500" />
+                        ) : wechatCopyState === "error" ? (
+                          <CircleAlert className="h-4 w-4 text-rose-600" />
+                        ) : (
+                          <ClipboardType className="h-4 w-4 text-slate-500" />
+                        )}
+                        {t(wechatCopyState === "copying" ? "editor.copyingToWeChat" : wechatCopyState === "copied" ? "editor.copiedToWeChat" : wechatCopyState === "error" ? "editor.copyToWeChatFailed" : "editor.copyToWeChat")}
+                      </DropdownMenuItem>
+                    </IconTooltip>
+                  )}
                 </>
               )}
               moreMenuItems={(
@@ -4585,14 +5054,16 @@ const RichEditorPane = ({
                   <Copy className="h-4 w-4 text-slate-500" />
                   {t(isLocalMemoId(memo.id) ? "editor.copyNoteIdAfterSync" : "editor.copyNoteId")}
                 </DropdownMenuItem>
-                <DropdownMenuItem
-                  className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                  onClick={openNoteReplace}
-                  disabled={effectiveReadOnly}
-                >
-                  <ReplaceAll className="h-4 w-4 text-slate-500" />
-                  {t("editor.replaceCurrentMemo")}
-                </DropdownMenuItem>
+                {!isEncryptedNote && (
+                  <DropdownMenuItem
+                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                    onClick={openNoteReplace}
+                    disabled={effectiveReadOnly}
+                  >
+                    <ReplaceAll className="h-4 w-4 text-slate-500" />
+                    {t("editor.replaceCurrentMemo")}
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                   onClick={() => {
@@ -4602,7 +5073,44 @@ const RichEditorPane = ({
                   <History className="h-4 w-4 text-slate-500" />
                   {t("editor.versionHistory")}
                 </DropdownMenuItem>
-                {!readOnly && (
+                {isEncryptedNote && onLockEncryptedNote && (
+                  <DropdownMenuItem
+                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                    onClick={onLockEncryptedNote}
+                  >
+                    <Lock className="h-4 w-4 text-slate-500" />
+                    {t("e2ee.lockNowButton")}
+                  </DropdownMenuItem>
+                )}
+                {!readOnly && !isEncryptedNote && onRequestEncryptNote && !demoMode && (
+                  <DropdownMenuItem
+                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                    disabled={isLocalMemoId(memo.id) || saveMutationPending}
+                    onClick={() => onRequestEncryptNote({
+                      title,
+                      contentMarkdown: getCurrentMarkdownForAi(),
+                      tags: parseTagsText(tagsText),
+                    })}
+                  >
+                    <Lock className="h-4 w-4 text-slate-500" />
+                    {t("e2ee.encryptNoteAction")}
+                  </DropdownMenuItem>
+                )}
+                {!readOnly && isEncryptedNote && onRequestDecryptNote && (
+                  <DropdownMenuItem
+                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                    disabled={saveMutationPending}
+                    onClick={() => onRequestDecryptNote({
+                      title,
+                      contentMarkdown: getCurrentMarkdownForAi(),
+                      tags: parseTagsText(tagsText),
+                    })}
+                  >
+                    <LockOpen className="h-4 w-4 text-slate-500" />
+                    {t("e2ee.decryptNoteAction")}
+                  </DropdownMenuItem>
+                )}
+                {!readOnly && !isEncryptedNote && (
                   <DropdownMenuItem
                     className={cn(
                       "flex h-9 w-full items-center gap-2 px-3 text-left text-xs hover:bg-slate-50 cursor-pointer outline-none",
@@ -4615,7 +5123,7 @@ const RichEditorPane = ({
                     {t(isLocalMemoId(memo.id) ? "sharing.afterSync" : isMemoShared ? "sharing.manage" : "sharing.action")}
                   </DropdownMenuItem>
                 )}
-                {!readOnly && onDuplicateMemo && (
+                {!readOnly && !isEncryptedNote && onDuplicateMemo && (
                   <DropdownMenuItem
                     className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                     // The server copies the saved note, so wait until every edit is saved.
@@ -4691,14 +5199,16 @@ const RichEditorPane = ({
                   </>
                 ) : (
                   <>
-                    <DropdownMenuItem
-                      className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                      onClick={handleSaveAsTemplate}
-                      disabled={effectiveReadOnly}
-                    >
-                      <Pencil className="h-4 w-4 text-slate-500" />
-                      {t("templates.saveAsTemplate")}
-                    </DropdownMenuItem>
+                    {!isEncryptedNote && (
+                      <DropdownMenuItem
+                        className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                        onClick={handleSaveAsTemplate}
+                        disabled={effectiveReadOnly}
+                      >
+                        <Pencil className="h-4 w-4 text-slate-500" />
+                        {t("templates.saveAsTemplate")}
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                     <DropdownMenuItem
                       className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-rose-700 hover:bg-rose-50 cursor-pointer outline-none"
@@ -4717,7 +5227,7 @@ const RichEditorPane = ({
           </div>
         </div>
 
-        {noteSearchOpen ? (
+        {noteSearchOpen && !isEncryptedNote ? (
           <EditorNoteSearchBar
             inputRef={noteSearchInputRef}
             query={noteSearchQuery}
@@ -4743,7 +5253,7 @@ const RichEditorPane = ({
             onEditorViewChange={isMobileViewport ? undefined : selectEditorView}
             onMarkdownModeChange={handleMarkdownModeChange}
             markdownModeShortcut={shortcutSettings.toggleEditorMode}
-            onPickAttachment={() => fileInputRef.current?.click()}
+            onPickAttachment={isEncryptedNote ? undefined : () => fileInputRef.current?.click()}
             onPickExternalLink={openExternalLinkDialog}
             externalLinkActive={externalLinkActive}
             onPickNoteLink={() => setNoteLinkPickerOpen(true)}
@@ -4772,13 +5282,17 @@ const RichEditorPane = ({
       <div
         ref={setEditorScrollContainerRef}
         onDragOver={(event) => {
-          if (useMobilePlainTextEditor || useMarkdownSourceEditor || effectiveReadOnly ||
+          if (isEncryptedNote || useMobilePlainTextEditor || useMarkdownSourceEditor || effectiveReadOnly ||
             !isEditorReady(editor) || !editor.isEditable || editor.view.dragging ||
             !Array.from(event.dataTransfer.types).includes("Files")) return;
           event.preventDefault();
           event.dataTransfer.dropEffect = "copy";
         }}
         onDrop={(event) => {
+          if (isEncryptedNote) {
+            if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
+            return;
+          }
           if (useMobilePlainTextEditor || useMarkdownSourceEditor || effectiveReadOnly ||
             !isEditorReady(editor)) return;
           // Bubble phase preserves node handlers; a handled drop is ignored by
@@ -4904,16 +5418,16 @@ const RichEditorPane = ({
                   <MarkdownSourceEditor
                     ref={markdownSourceEditorRef}
                     memoId={memo?.id ?? ""}
-                    searchQuery={noteSearchHighlightQuery}
+                    searchQuery={isEncryptedNote ? "" : noteSearchHighlightQuery}
                     searchIndex={noteSearchHighlightIndex}
                     value={markdownSource}
                     onChange={handleMarkdownSourceChange}
-                    onPasteFiles={uploadMarkdownPasteFiles}
+                    onPasteFiles={isEncryptedNote ? undefined : uploadMarkdownPasteFiles}
                     themeName={markdownTheme}
                     readOnly={effectiveReadOnly}
                     placeholder={`# ${t("editor.placeholder")}`}
                     ariaLabel={t("editor.markdownSourceAria")}
-                    onSlashCommandTrigger={() => {
+                    onSlashCommandTrigger={isEncryptedNote ? undefined : () => {
                       openAiAssistant();
                     }}
                     onLinkShortcut={openExternalLinkDialog}
@@ -4922,7 +5436,7 @@ const RichEditorPane = ({
                     className="absolute inset-0 h-full w-full"
                   />
                 </Suspense>
-                {markdownAiMenu ? (
+                {markdownAiMenu && !isEncryptedNote ? (
                   <div
                     className="absolute z-40"
                     style={{
@@ -4949,7 +5463,7 @@ const RichEditorPane = ({
               >
                 <BubbleMenu
                   editor={editor}
-                  shouldShow={aiBubbleMenu.shouldShow}
+                  shouldShow={(props) => !isEncryptedNoteRef.current && aiBubbleMenu.shouldShow(props)}
                   options={aiBubbleMenu.options}
                 >
                   <SelectionAiActions
@@ -5101,7 +5615,7 @@ const RichEditorPane = ({
       )}
 
       {/* Overlay the article/outline; horizontal space belongs to the document. */}
-      {!effectiveReadOnly && !aiAssistantOpen ? (
+      {!effectiveReadOnly && !isEncryptedNote && !aiAssistantOpen ? (
         <IconTooltip
           side="left"
           label={`${t("aiAssistant.open")} (${formatShortcutBinding(shortcutSettings.openAiAssistant)})`}
@@ -5192,14 +5706,15 @@ const RichEditorPane = ({
           open={aiAssistantOpen}
           onOpenChange={setAiSidebarOpen}
           companionAvailable={companionAvailable}
-          selectionMarkdown={selectionPin?.memoId === memo.id ? selectionPin.sentText : ""}
-          selectionPin={selectionPin?.memoId === memo.id ? selectionPin : null}
-          selectionRequest={selectionRequest}
+          encrypted={isEncryptedNote}
+          selectionMarkdown={isEncryptedNote ? "" : (selectionPin?.memoId === memo.id ? selectionPin.sentText : "")}
+          selectionPin={isEncryptedNote ? null : (selectionPin?.memoId === memo.id ? selectionPin : null)}
+          selectionRequest={isEncryptedNote ? null : selectionRequest}
           onDismissSelectionPin={() => setSelectionPin(null)}
           onReplaceSelection={replacePinnedSelection}
-          aiDraftEditor={aiDraftEditor}
+          aiDraftEditor={isEncryptedNote ? null : aiDraftEditor}
           localDataScope={localDataScope}
-          contentMarkdown={currentMarkdownForAi}
+          contentMarkdown={isEncryptedNote ? "" : currentMarkdownForAi}
           memoId={memo.id}
           notebookId={memo.notebookId}
           notebookTitle={notebookName}

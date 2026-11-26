@@ -4,7 +4,7 @@ import { FileText, Folder, Loader2, MessageCircle, Tag, X } from "lucide-react";
 import type {
   CompanionAction, CompanionAnswer, CompanionDiscoverySettings, CompanionEvent, CompanionMention, CompanionTurn, CompanionTurnInput,
 } from "@edgeever/shared";
-import { companionFailureDiagnostics, parseCompanionMentionQuery, getMemoDisplayTitle } from "@edgeever/shared";
+import { companionFailureDiagnostics, hasEncryptedNoteMarker, parseCompanionMentionQuery, getMemoDisplayTitle } from "@edgeever/shared";
 import { Button } from "@/components/ui/button";
 import { api, ApiRequestError } from "@/lib/api";
 import { companionLocale } from "@/lib/companion-locale";
@@ -175,21 +175,28 @@ export function CompanionChat({
       setMentions([]);
       setTurns(previous => [{ ...emptyTurn({ id, threadId, message: text }), mentions: pinned }, ...previous]);
       let completed = false;
+      const focusIsEncrypted = Boolean(
+        focus && (
+          (focus as { encrypted?: boolean }).encrypted === true
+          || hasEncryptedNoteMarker(focus.contentMarkdown)
+          || hasEncryptedNoteMarker(focus.selectionMarkdown)
+        ),
+      );
       const payload: CompanionTurnInput = {
         id, threadId, message: text, useMemory,
         allowNotes: true,
         allowWrites: true,
         locale: companionLocale(i18n.resolvedLanguage),
         ...(pinned.length ? { mentions: pinned } : {}),
-        ...(focus?.memoId || focus?.selectionMarkdown?.trim() || focus?.contentMarkdown?.trim() || focus?.diagramKind
+        ...(focus?.memoId || (!focusIsEncrypted && (focus?.selectionMarkdown?.trim() || focus?.contentMarkdown?.trim())) || focus?.diagramKind
           ? { focus: {
             ...(focus.memoId ? { memoId: focus.memoId } : {}),
             ...(focus.notebookId ? { notebookId: focus.notebookId } : {}),
             ...(focus.notebookTitle ? { notebookTitle: focus.notebookTitle } : {}),
             ...(focus.title ? { title: focus.title } : {}),
-            ...(focus.selectionMarkdown?.trim() ? { selectionMarkdown: focus.selectionMarkdown.trim().slice(0, 2000) } : {}),
+            ...(!focusIsEncrypted && focus.selectionMarkdown?.trim() ? { selectionMarkdown: focus.selectionMarkdown.trim().slice(0, 2000) } : {}),
             ...(focus.diagramKind ? { diagramKind: focus.diagramKind } : {}),
-            ...(!focus.diagramKind && focus.contentMarkdown?.trim()
+            ...(!focusIsEncrypted && !focus.diagramKind && focus.contentMarkdown?.trim()
               ? {
                 contentMarkdown: focus.contentMarkdown.trim().slice(0, 4000),
                 ...(focus.contentTruncated ? { contentTruncated: true } : {}),

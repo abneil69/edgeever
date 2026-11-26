@@ -2,7 +2,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction};
 use serde_json::{json, Value};
 
 use crate::catalog::is_inbox_notebook;
-use crate::memo::{create_memo, memo_value};
+use crate::memo::{create_memo, empty_doc_json, memo_value};
+use crate::note_summary::has_encrypted_note_marker;
 use crate::{bool_param, enqueue_change, memo_remap_base_key, meta_value, set_meta, string_param};
 
 pub(crate) fn sync_status(database: &Connection) -> Result<Value, String> {
@@ -949,14 +950,54 @@ fn apply_one_sync_change(
     } else {
         None
     };
-    let content_json = memo
-        .get("contentJson")
-        .cloned()
-        .unwrap_or_else(|| json!({"type":"doc","content":[]}));
+    let content_markdown = string_param(memo, "contentMarkdown")?;
+    let encrypted = has_encrypted_note_marker(&content_markdown);
+    let content_json = if encrypted {
+        empty_doc_json()
+    } else {
+        memo.get("contentJson")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"doc","content":[]}))
+    };
+    let excerpt = if encrypted {
+        String::new()
+    } else {
+        string_param(memo, "excerpt")?
+    };
+    let content_text = if encrypted {
+        String::new()
+    } else {
+        string_param(memo, "contentText")?
+    };
+    let previous_markdown: Option<String> = tx
+        .query_row(
+            "SELECT content_markdown FROM memo_contents WHERE memo_id = ?1",
+            [&entity_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
     let requested_notebook_id = string_param(memo, "notebookId")?;
     let notebook_id = resolve_active_notebook_id(tx, &requested_notebook_id)?;
-    tx.execute("INSERT INTO memos (id, notebook_id, title, excerpt, tags_json, is_pinned, is_archived, is_deleted, source_memo_ids, merge_source_count, merged_into_memo_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(id) DO UPDATE SET notebook_id=excluded.notebook_id, title=excluded.title, excerpt=excluded.excerpt, tags_json=excluded.tags_json, is_pinned=excluded.is_pinned, is_archived=excluded.is_archived, is_deleted=excluded.is_deleted, source_memo_ids=excluded.source_memo_ids, merge_source_count=excluded.merge_source_count, merged_into_memo_id=excluded.merged_into_memo_id, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at", rusqlite::params![entity_id, notebook_id, memo.get("title").and_then(Value::as_str), string_param(memo, "excerpt")?, tags, memo.get("isPinned").and_then(Value::as_bool).unwrap_or(false) as i64, memo.get("isArchived").and_then(Value::as_bool).unwrap_or(false) as i64, memo.get("isDeleted").and_then(Value::as_bool).unwrap_or(false) as i64, source_ids, memo.get("mergeSourceCount").and_then(Value::as_i64).unwrap_or(0), merge_target, string_param(memo, "createdAt")?, string_param(memo, "updatedAt")?, memo.get("deletedAt").and_then(Value::as_str)]).map_err(|e| e.to_string())?;
-    tx.execute("INSERT INTO memo_contents (memo_id, content_json, content_markdown, content_text, content_hash, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(memo_id) DO UPDATE SET content_json=excluded.content_json, content_markdown=excluded.content_markdown, content_text=excluded.content_text, content_hash=excluded.content_hash, revision=excluded.revision, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", rusqlite::params![entity_id, content_json.to_string(), string_param(memo, "contentMarkdown")?, string_param(memo, "contentText")?, string_param(memo, "contentHash")?, memo.get("revision").and_then(Value::as_i64).unwrap_or(0)]).map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO memos (id, notebook_id, title, excerpt, tags_json, is_pinned, is_archived, is_deleted, source_memo_ids, merge_source_count, merged_into_memo_id, created_at, updated_at, deleted_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) ON CONFLICT(id) DO UPDATE SET notebook_id=excluded.notebook_id, title=excluded.title, excerpt=excluded.excerpt, tags_json=excluded.tags_json, is_pinned=excluded.is_pinned, is_archived=excluded.is_archived, is_deleted=excluded.is_deleted, source_memo_ids=excluded.source_memo_ids, merge_source_count=excluded.merge_source_count, merged_into_memo_id=excluded.merged_into_memo_id, updated_at=excluded.updated_at, deleted_at=excluded.deleted_at", rusqlite::params![entity_id, notebook_id, memo.get("title").and_then(Value::as_str), excerpt, tags, memo.get("isPinned").and_then(Value::as_bool).unwrap_or(false) as i64, memo.get("isArchived").and_then(Value::as_bool).unwrap_or(false) as i64, memo.get("isDeleted").and_then(Value::as_bool).unwrap_or(false) as i64, source_ids, memo.get("mergeSourceCount").and_then(Value::as_i64).unwrap_or(0), merge_target, string_param(memo, "createdAt")?, string_param(memo, "updatedAt")?, memo.get("deletedAt").and_then(Value::as_str)]).map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO memo_contents (memo_id, content_json, content_markdown, content_text, content_hash, revision) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(memo_id) DO UPDATE SET content_json=excluded.content_json, content_markdown=excluded.content_markdown, content_text=excluded.content_text, content_hash=excluded.content_hash, revision=excluded.revision, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')", rusqlite::params![entity_id, content_json.to_string(), content_markdown, content_text, string_param(memo, "contentHash")?, memo.get("revision").and_then(Value::as_i64).unwrap_or(0)]).map_err(|e| e.to_string())?;
+    if encrypted
+        && previous_markdown
+            .as_deref()
+            .is_some_and(|prev| !has_encrypted_note_marker(prev))
+    {
+        let has_revisions_table: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memo_revisions')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if has_revisions_table {
+            tx.execute("DELETE FROM memo_revisions WHERE memo_id = ?1", [&entity_id])
+                .map_err(|e| e.to_string())?;
+        }
+    }
     for source_id in source_memo_ids.iter().filter_map(Value::as_str) {
         tx.execute(
             "UPDATE memos SET merged_into_memo_id = ?1 WHERE id = ?2",

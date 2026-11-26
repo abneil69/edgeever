@@ -182,6 +182,15 @@ export const createNoteWindowController = ({
     return true;
   };
 
+  /** Broadcast an event to every open note window. */
+  const broadcast = (channel, payload) => {
+    for (const entry of entries.values()) {
+      if (live(entry) && !entry.failed) {
+        entry.window.webContents.send(channel, payload);
+      }
+    }
+  };
+
   /** The renderer is ready to answer close requests. */
   const markListening = (contents) => {
     const entry = entryForContents(contents);
@@ -206,6 +215,7 @@ export const createNoteWindowController = ({
   const closeAll = () => Promise.all([...entries.values()].map((entry) => requestClose(entry, { forced: true })));
 
   return {
+    broadcast,
     closeAll,
     fail,
     failureReason,

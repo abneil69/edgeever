@@ -49,6 +49,11 @@ interface DesktopNoteWindowSyncUpdate {
 interface EdgeEverDesktopBridge {
   backup<A extends keyof import("@edgeever/shared").DesktopBackupActions>(action: A, input?: import("@edgeever/shared").DesktopBackupActions[A]["input"]): Promise<import("@edgeever/shared").DesktopBackupActions[A]["output"]>;
   onBackupStatus(callback: (status: import("@edgeever/shared").DesktopBackupStatus | null) => void): () => void;
+  e2eeBiometricStatus?(): Promise<{ available: boolean; enabled: boolean; keyId: string | null }>;
+  e2eeBiometricEnable?(input: { keyId: string; masterKeyBase64: string; reason?: string }): Promise<{ enabled: boolean; keyId: string }>;
+  e2eeBiometricUnlock?(input?: { expectedKeyId?: string; reason?: string }): Promise<{ keyId: string; masterKeyBase64: string }>;
+  e2eeBiometricDisable?(): Promise<{ enabled: boolean; keyId: null }>;
+  onE2eeLock?(callback: (payload: { reason: string }) => void): () => void;
   isAvailable: boolean;
   canClearLocalData: boolean;
   recoveredAfterAbnormalExit: boolean;

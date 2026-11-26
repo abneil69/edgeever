@@ -116,6 +116,7 @@ const getSelectionCountLabel = (count: number, t: ReturnType<typeof useTranslati
   count > 0 ? t("memoList.selectionCount", { count }) : t("memoList.selectMemo");
 
 export const MemoSelectionActionBar = ({
+  canMerge = true,
   canMove,
   deleteTitle,
   exportTitle,
@@ -141,6 +142,7 @@ export const MemoSelectionActionBar = ({
   selectedCount,
   onMoveTargetChange,
 }: {
+  canMerge?: boolean;
   canMove: boolean;
   deleteTitle: string;
   exportTitle: string;
@@ -222,7 +224,7 @@ export const MemoSelectionActionBar = ({
           variant="ghost"
           title={mergeTitle}
           onClick={onMerge}
-          disabled={selectedCount < 2 || isMerging || isTrashView}
+          disabled={selectedCount < 2 || !canMerge || isMerging || isTrashView}
         >
           <Merge className="h-4 w-4" />
           {t("memoList.mergeMemos")}
@@ -586,8 +588,17 @@ export const MemoListPane = ({
             : t("workspace.selection.move");
   const selectionDeleteTitle =
     selectedMemoIds.size === 0 ? t("workspace.selection.chooseMemo") : isDeleting ? t("workspace.selection.deleting") : view === "trash" ? t("workspace.selection.permanentDelete") : t("workspace.selection.delete");
+  const selectionHasEncrypted = selectedMemosInList.some((memo) => Boolean(memo.encrypted));
   const selectionMergeTitle =
-    selectedMemoIds.size < 2 ? t("workspace.selection.needTwoMemos") : view === "trash" ? t("workspace.selection.trashCannotMerge") : isMerging ? t("workspace.selection.merging") : t("workspace.selection.merge");
+    selectedMemoIds.size < 2
+      ? t("workspace.selection.needTwoMemos")
+      : view === "trash"
+        ? t("workspace.selection.trashCannotMerge")
+        : selectionHasEncrypted
+          ? t("e2ee.encryptedMergeDisabled")
+          : isMerging
+            ? t("workspace.selection.merging")
+            : t("workspace.selection.merge");
   const selectionExportTitle =
     selectedMemoIds.size === 0
       ? t("workspace.selection.chooseMemo")
@@ -1640,7 +1651,7 @@ export const MemoListPane = ({
                       ))}
                     </DropdownMenuSubContent>
                   </DropdownMenuSub>
-                  {canCreateMemo && view !== "trash" && (
+                  {canCreateMemo && view !== "trash" && !memoContextMenu.memo.encrypted && (
                     <DropdownMenuItem
                       className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                       disabled={isLocalMemoId(memoContextMenu.memo.id)}
@@ -1654,30 +1665,34 @@ export const MemoListPane = ({
                       {t("editor.duplicate")}
                     </DropdownMenuItem>
                   )}
-                  <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
-                  <DropdownMenuItem
-                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                    disabled={isLocalMemoId(memoContextMenu.memo.id)}
-                    onClick={() => requestContextDocumentAction("share")}
-                  >
-                    {contextShareQuery.data?.share ? <Globe className="h-4 w-4 text-slate-950" /> : <Share2 className="h-4 w-4 text-slate-500" />}
-                    {t(isLocalMemoId(memoContextMenu.memo.id) ? "sharing.afterSync" : contextShareQuery.data?.share ? "sharing.manage" : "sharing.action")}
-                  </DropdownMenuItem>
-                  {!isLocalMemoId(memoContextMenu.memo.id) && <MemoNotebookSites key={memoContextMenu.memo.id} memoId={memoContextMenu.memo.id} presentation="menu" />}
-                  {!memoContextMenu.memo.diagramKind && !memoContextMenu.memo.structuredTable && !memoContextMenu.memo.infographic && !memoContextMenu.memo.poster && (
-                    <IconTooltip
-                      side="right"
-                      contentClassName="z-[110] max-w-xs whitespace-normal"
-                      label={t("editor.copyToWeChatTooltip")}
-                    >
+                  {!memoContextMenu.memo.encrypted && (
+                    <>
+                      <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                       <DropdownMenuItem
                         className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                        onClick={() => void handleCopyContextMemoToWeChat()}
+                        disabled={isLocalMemoId(memoContextMenu.memo.id)}
+                        onClick={() => requestContextDocumentAction("share")}
                       >
-                        <ClipboardType className="h-4 w-4 text-slate-500" />
-                        {t("editor.copyToWeChat")}
+                        {contextShareQuery.data?.share ? <Globe className="h-4 w-4 text-slate-950" /> : <Share2 className="h-4 w-4 text-slate-500" />}
+                        {t(isLocalMemoId(memoContextMenu.memo.id) ? "sharing.afterSync" : contextShareQuery.data?.share ? "sharing.manage" : "sharing.action")}
                       </DropdownMenuItem>
-                    </IconTooltip>
+                      {!isLocalMemoId(memoContextMenu.memo.id) && <MemoNotebookSites key={memoContextMenu.memo.id} memoId={memoContextMenu.memo.id} presentation="menu" />}
+                      {!memoContextMenu.memo.diagramKind && !memoContextMenu.memo.structuredTable && !memoContextMenu.memo.infographic && !memoContextMenu.memo.poster && (
+                        <IconTooltip
+                          side="right"
+                          contentClassName="z-[110] max-w-xs whitespace-normal"
+                          label={t("editor.copyToWeChatTooltip")}
+                        >
+                          <DropdownMenuItem
+                            className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                            onClick={() => void handleCopyContextMemoToWeChat()}
+                          >
+                            <ClipboardType className="h-4 w-4 text-slate-500" />
+                            {t("editor.copyToWeChat")}
+                          </DropdownMenuItem>
+                        </IconTooltip>
+                      )}
+                    </>
                   )}
                   <DropdownMenuItem
                     className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
@@ -1827,7 +1842,7 @@ export const MemoListPane = ({
         <Suspense fallback={null}>
           <MobileSelectionMoreSheet
             canExport={selectedMemoIds.size > 0 && view !== "trash" && !isExporting}
-            canMerge={selectedMemoIds.size >= 2 && view !== "trash" && !isMerging}
+            canMerge={selectedMemoIds.size >= 2 && view !== "trash" && !selectionHasEncrypted && !isMerging}
             canPin={selectedMemoIds.size > 0 && view !== "trash" && !isPinning}
             canToggleVisibleSelection={canToggleVisibleMemoSelection}
             exportTitle={selectionExportTitle}

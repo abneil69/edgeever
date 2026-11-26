@@ -55,6 +55,7 @@
     "./poster-render-events": "./src/poster-render-events.ts",
     "./backup-archive": "./src/backup-archive.ts",
     "./backup-markdown": "./src/backup-markdown.ts",
+    "./e2ee": "./src/e2ee.ts",
     "./note-import": "./src/note-import/index.ts",
     "./note-import/types": "./src/note-import/types.ts"
   },

@@ -540,4 +540,70 @@ describe("local mirror", () => {
       globalThis.caches = previousCaches;
     }
   });
+
+  test("putLocalMemoUpdate removes only non-encrypted local revisions when transitioning plaintext back to encrypted", async () => {
+    const scope = createLocalDataScope("https://demo.edgeever.org", "user-e2ee");
+    const encryptedEnvelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\",\"wrappedDek\":\"AAAA\",\"dekIv\":\"AAAA\",\"iv\":\"AAAA\",\"ciphertext\":\"AAAA\"}\n```";
+    const memo = {
+      id: "memo-e2ee-rev-1",
+      notebookId: "nb-1",
+      title: "Vault",
+      excerpt: "Plain excerpt",
+      tags: ["vault"],
+      isPinned: false,
+      isArchived: false,
+      isDeleted: false,
+      revision: 3,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-03T00:00:00.000Z",
+      deletedAt: null,
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Plain now" }] }] },
+      contentMarkdown: "Plain now",
+      contentText: "Plain now",
+      contentHash: "hash-plain",
+      sourceMemoIds: [],
+      mergeSourceCount: 0,
+      mergedIntoMemoId: null,
+    };
+    await putLocalMemo(scope, memo);
+    await putLocalMemoRevisions(scope, [
+      {
+        id: "rev-enc-old",
+        memoId: memo.id,
+        revision: 1,
+        title: "Vault",
+        contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+        contentMarkdown: encryptedEnvelope,
+        contentText: "",
+        tags: ["vault"],
+        actor: "user:test",
+        createdAt: "2026-01-01T00:00:00.000Z",
+      },
+      {
+        id: "rev-plain-mid",
+        memoId: memo.id,
+        revision: 2,
+        title: "Vault",
+        contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Intermediate plain" }] }] },
+        contentMarkdown: "Intermediate plain",
+        contentText: "Intermediate plain",
+        tags: ["vault"],
+        actor: "user:test",
+        createdAt: "2026-01-02T00:00:00.000Z",
+      },
+    ]);
+
+    const updated = await putLocalMemoUpdate(scope, memo, {
+      title: "Vault",
+      contentJson: { type: "doc", content: [{ type: "paragraph" }] },
+      contentMarkdown: encryptedEnvelope,
+      tags: ["vault"],
+    });
+    expect(updated.excerpt).toBe("");
+    expect(updated.contentText).toBe("");
+    expect(updated.contentJson).toEqual({ type: "doc", content: [{ type: "paragraph" }] });
+
+    const remaining = await listLocalMemoRevisions(scope, memo.id);
+    expect(remaining.revisions.map((rev) => rev.id)).toEqual(["rev-enc-old"]);
+  });
 });

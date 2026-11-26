@@ -17,6 +17,7 @@ import { api, ApiRequestError } from "@/lib/api";
 import { parseTagsText } from "@/lib/utils";
 
 type EditorTagPickerProps = {
+  aiTagSuggestionDisabled?: boolean;
   contentMarkdown: string;
   disabled: boolean;
   loadTags: () => Promise<{ tags: TagSummary[] }>;
@@ -31,7 +32,7 @@ type AiGenerationStatus =
   | { kind: "empty" }
   | { kind: "error"; message: string };
 
-export const EditorTagPicker = ({ contentMarkdown, disabled, loadTags, title, value, onChange }: EditorTagPickerProps) => {
+export const EditorTagPicker = ({ aiTagSuggestionDisabled = false, contentMarkdown, disabled, loadTags, title, value, onChange }: EditorTagPickerProps) => {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -82,7 +83,7 @@ export const EditorTagPicker = ({ contentMarkdown, disabled, loadTags, title, va
     }, 4000);
   };
   const generateAndApplyTags = async () => {
-    if (!title.trim() && !contentMarkdown.trim()) return;
+    if (aiTagSuggestionDisabled || (!title.trim() && !contentMarkdown.trim())) return;
     suggestionControllerRef.current?.abort();
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
     const controller = new AbortController();
@@ -189,6 +190,7 @@ export const EditorTagPicker = ({ contentMarkdown, disabled, loadTags, title, va
           </Tooltip>
         </TooltipProvider>
 
+        {!aiTagSuggestionDisabled ? (
         <TooltipProvider delayDuration={0} skipDelayDuration={0}>
           <Tooltip>
             <TooltipTrigger asChild>
@@ -215,6 +217,7 @@ export const EditorTagPicker = ({ contentMarkdown, disabled, loadTags, title, va
             <TooltipContent side="bottom">{aiDescription}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
+        ) : null}
 
         <span className="sr-only" aria-live="polite">{suggesting || aiStatus.kind !== "idle" ? aiDescription : ""}</span>
       </div>

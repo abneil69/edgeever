@@ -96,7 +96,7 @@ export interface PluginSettingsSchema {
 
 export type PluginSettingValue = string | number | boolean;
 
-export const PLUGIN_API_ERROR_CODES = ["NOTE_CONFLICT", "RESOURCE_CONFLICT", "INVALID_MARKDOWN_EDIT", "STRUCTURED_NOTE_REQUIRED", "INVALID_STRUCTURED_EDIT", "NOTE_TYPE_MISMATCH", "TABLE_DATA_CHANGES_REQUIRED", "HOST_UPGRADE_REQUIRED"] as const;
+export const PLUGIN_API_ERROR_CODES = ["NOTE_CONFLICT", "RESOURCE_CONFLICT", "INVALID_MARKDOWN_EDIT", "STRUCTURED_NOTE_REQUIRED", "INVALID_STRUCTURED_EDIT", "NOTE_TYPE_MISMATCH", "TABLE_DATA_CHANGES_REQUIRED", "HOST_UPGRADE_REQUIRED", "ENCRYPTED_NOTE_FORBIDDEN"] as const;
 export type PluginApiErrorCode = (typeof PLUGIN_API_ERROR_CODES)[number];
 export interface PluginApiError extends Error {
   code: PluginApiErrorCode;
@@ -204,6 +204,7 @@ export interface PluginNoteSummary {
   notebookId: string;
   title: string | null;
   excerpt: string;
+  encrypted?: boolean;
   tags: string[];
   isPinned: boolean;
   createdAt: string;

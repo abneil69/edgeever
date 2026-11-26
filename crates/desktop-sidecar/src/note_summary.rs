@@ -30,8 +30,54 @@ struct SummaryEdge {
     target: String,
 }
 
+pub(crate) fn has_encrypted_note_marker(markdown: &str) -> bool {
+    let bytes = markdown.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let ch = bytes[i];
+        if ch == b'`' || ch == b'~' {
+            let start = i;
+            while i < bytes.len() && bytes[i] == ch {
+                i += 1;
+            }
+            if i - start >= 3 {
+                let mut j = i;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                let token = b"edgeever-encrypted-note";
+                if j + token.len() <= bytes.len()
+                    && bytes[j..j + token.len()].eq_ignore_ascii_case(token)
+                {
+                    let after = &markdown[j + token.len()..];
+                    let valid_boundary = match after.chars().next() {
+                        None => true,
+                        Some(next) => {
+                            next.is_whitespace() || matches!(next, '`' | '~' | ':' | '-')
+                        }
+                    };
+                    if valid_boundary {
+                        return true;
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 pub(crate) fn note_list_metadata(markdown: &str) -> Value {
     let mut metadata = Map::new();
+    if has_encrypted_note_marker(markdown) {
+        metadata.insert("diagramKind".to_owned(), Value::Null);
+        metadata.insert("infographic".to_owned(), json!(false));
+        metadata.insert("poster".to_owned(), json!(false));
+        metadata.insert("structuredTable".to_owned(), json!(false));
+        metadata.insert("encrypted".to_owned(), json!(true));
+        return Value::Object(metadata);
+    }
     match diagram_preview(markdown) {
         Some(preview) => {
             metadata.insert("diagramKind".to_owned(), json!(preview.kind));
@@ -640,6 +686,20 @@ mod tests {
             serde_json::json!(["名称", "字段"])
         );
         assert!(metadata.get("contentMarkdown").is_none());
+    }
+
+    #[test]
+    fn encrypted_note_marker_is_recognized_and_clears_structured_flags() {
+        let encrypted = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\"}\n```";
+        let metadata = note_list_metadata(encrypted);
+        assert_eq!(metadata["encrypted"], true);
+        assert_eq!(metadata["diagramKind"], serde_json::Value::Null);
+        assert_eq!(metadata["infographic"], false);
+        assert_eq!(metadata["poster"], false);
+        assert_eq!(metadata["structuredTable"], false);
+
+        let ordinary = note_list_metadata("plain note mentioning edgeever-encrypted-note");
+        assert!(ordinary.get("encrypted").is_none());
     }
 
     fn encode_json(json: &str) -> String {

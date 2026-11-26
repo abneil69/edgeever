@@ -177,8 +177,12 @@ const AuthenticatedWorkspace = ({ siteManagement = false }: { siteManagement?: b
   const logoutMutation = useMutation({
     mutationFn: async () => {
       // Stop AI drafts being generated before the session ends, so none is saved afterwards (#652).
-      const drafts = await import("@/lib/ai-body-draft-store");
+      const [drafts, e2ee] = await Promise.all([
+        import("@/lib/ai-body-draft-store"),
+        import("@/lib/e2ee"),
+      ]);
       drafts.cancelAiBodyDraftRuns();
+      await e2ee.e2eeSession.lock("logout");
       return api.logout();
     },
     onSuccess: async () => {
@@ -204,6 +208,7 @@ const AuthenticatedWorkspace = ({ siteManagement = false }: { siteManagement?: b
 
   useEffect(() => {
     const handleUnauthorized = () => {
+      void import("@/lib/e2ee").then((module) => module.e2eeSession.lock("logout")).catch(() => undefined);
       const current = queryClient.getQueryData<AuthSession>(["auth", "session"]);
       clearCachedDesktopSession();
       // Keep the observed session query alive so this transition is delivered

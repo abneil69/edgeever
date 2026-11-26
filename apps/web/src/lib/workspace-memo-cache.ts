@@ -3,8 +3,10 @@ import {
   createExcerpt,
   docToText,
   getDiagramSummary,
+  getEncryptedNoteSummary,
   getInfographicSummary,
   getTableSummary,
+  hasEncryptedNoteMarker,
   resolveMemoContentDoc,
   type MemoDetail,
   type MemoSummary,
@@ -27,23 +29,27 @@ export type TrashClearCacheSnapshot = Pick<MemoRemovalCacheSnapshot, "previousMe
 
 export const memoDetailQueryKey = (memoId: string, view: MemoView) => ["memo", memoId, view] as const;
 
-export const memoToSummary = (memo: MemoDetail): MemoSummary => ({
-  id: memo.id,
-  notebookId: memo.notebookId,
-  title: memo.title,
-  excerpt: memo.excerpt || createExcerpt(memo.contentText || docToText(resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown))),
-  ...getDiagramSummary(memo.contentMarkdown),
-  ...getInfographicSummary(memo.contentMarkdown),
-  ...getTableSummary(memo.contentMarkdown),
-  tags: memo.tags,
-  isPinned: memo.isPinned,
-  isArchived: memo.isArchived,
-  isDeleted: memo.isDeleted,
-  revision: memo.revision,
-  createdAt: memo.createdAt,
-  updatedAt: memo.updatedAt,
-  deletedAt: memo.deletedAt,
-});
+export const memoToSummary = (memo: MemoDetail): MemoSummary => {
+  const encrypted = hasEncryptedNoteMarker(memo.contentMarkdown);
+  return {
+    id: memo.id,
+    notebookId: memo.notebookId,
+    title: memo.title,
+    excerpt: encrypted ? "" : (memo.excerpt || createExcerpt(memo.contentText || docToText(resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown)))),
+    ...(encrypted ? {} : getDiagramSummary(memo.contentMarkdown)),
+    ...(encrypted ? {} : getInfographicSummary(memo.contentMarkdown)),
+    ...(encrypted ? {} : getTableSummary(memo.contentMarkdown)),
+    ...getEncryptedNoteSummary(memo.contentMarkdown),
+    tags: memo.tags,
+    isPinned: memo.isPinned,
+    isArchived: memo.isArchived,
+    isDeleted: memo.isDeleted,
+    revision: memo.revision,
+    createdAt: memo.createdAt,
+    updatedAt: memo.updatedAt,
+    deletedAt: memo.deletedAt,
+  };
+};
 
 export const cacheMemoDetail = (queryClient: QueryClient, memo: MemoDetail, view: MemoView = memo.isDeleted ? "trash" : "notebook") => {
   queryClient.setQueryData(memoDetailQueryKey(memo.id, view), { memo });

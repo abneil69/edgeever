@@ -51,6 +51,7 @@ const AiSpaceShortcutSettingsItem = lazy(() => import("./settings/AiSpaceShortcu
 const ShortcutSettingsItem = lazy(() => import("./settings/ShortcutSettingsItem").then((module) => ({ default: module.ShortcutSettingsItem })));
 const PasswordCard = lazy(() => import("./settings/PasswordCard").then((module) => ({ default: module.PasswordCard })));
 const TwoFactorCard = lazy(() => import("./settings/TwoFactorCard").then((module) => ({ default: module.TwoFactorCard })));
+const E2eeSettingsCard = lazy(() => import("./settings/E2eeSettingsCard").then((module) => ({ default: module.E2eeSettingsCard })));
 const UserManagementCard = lazy(() => import("./settings/UserManagementCard").then((module) => ({ default: module.UserManagementCard })));
 const ObjectStorageCard = lazy(() => import("./settings/ObjectStorageCard").then((module) => ({ default: module.ObjectStorageCard })));
 const AiModelCard = lazy(() => import("./settings/AiModelCard").then((module) => ({ default: module.AiModelCard })));
@@ -339,6 +340,7 @@ export const SettingsPane = ({
           <SettingsGroup>
             <AccountInfoCard user={user} isLoggingOut={isLoggingOut} onLogout={onLogout} />
             <PasswordCard authRequired={authRequired} demoMode={demoMode} />
+            <E2eeSettingsCard demoMode={demoMode} />
             {demoMode ? null : <TwoFactorCard authRequired={authRequired} />}
             {demoMode ? null : (
               <LoginDevicesCard authRequired={authRequired} />

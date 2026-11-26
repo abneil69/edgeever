@@ -1,21 +1,31 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::note_summary::note_list_metadata;
+use crate::note_summary::{has_encrypted_note_marker, note_list_metadata};
 use crate::sync::resolve_active_notebook_id;
 use crate::{
     bool_param, content_hash, enqueue_change, markdown_doc, memo_remap_base_key, now_id,
     resolve_remapped_memo_base, string_param, tags_from_json,
 };
 
+pub(crate) fn empty_doc_json() -> Value {
+    json!({ "type": "doc", "content": [{ "type": "paragraph" }] })
+}
+
 fn summary_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     let tags: String = row.get("tags_json")?;
     let markdown: String = row.get("content_markdown")?;
+    let encrypted = has_encrypted_note_marker(&markdown);
+    let excerpt = if encrypted {
+        String::new()
+    } else {
+        row.get::<_, String>("excerpt")?
+    };
     let mut summary = json!({
         "id": row.get::<_, String>("id")?,
         "notebookId": row.get::<_, String>("notebook_id")?,
         "title": row.get::<_, Option<String>>("title")?,
-        "excerpt": row.get::<_, String>("excerpt")?,
+        "excerpt": excerpt,
         "tags": tags_from_json(&tags),
         "isPinned": row.get::<_, i64>("is_pinned")? != 0,
         "isArchived": row.get::<_, i64>("is_archived")? != 0,
@@ -138,21 +148,38 @@ pub(crate) fn cache_memo_revision(database: &Connection, params: &Value) -> Resu
         .ok_or_else(|| "Missing revision".to_owned())?;
     let memo_id = string_param(revision, "memoId")?;
     let revision_id = string_param(revision, "id")?;
-    let content_json = revision
-        .get("contentJson")
-        .cloned()
-        .unwrap_or_else(|| json!({"type":"doc","content":[]}));
+    let markdown = revision
+        .get("contentMarkdown")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let encrypted = has_encrypted_note_marker(markdown);
+    let content_json = if encrypted {
+        empty_doc_json()
+    } else {
+        revision
+            .get("contentJson")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"doc","content":[]}))
+    };
+    let content_text = if encrypted {
+        ""
+    } else {
+        revision
+            .get("contentText")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+    };
     let tags = revision.get("tags").cloned().unwrap_or_else(|| json!([]));
     database.execute(
         "INSERT INTO memo_revisions (id, memo_id, revision, title, content_json, content_markdown, content_hash, created_by, created_at, tags_json, content_text) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) ON CONFLICT(id) DO UPDATE SET memo_id=excluded.memo_id, revision=excluded.revision, title=excluded.title, content_json=excluded.content_json, content_markdown=excluded.content_markdown, content_hash=excluded.content_hash, created_by=excluded.created_by, created_at=excluded.created_at, tags_json=excluded.tags_json, content_text=excluded.content_text",
         rusqlite::params![
             revision_id, memo_id, revision.get("revision").and_then(Value::as_i64).unwrap_or(0),
             revision.get("title").and_then(Value::as_str), content_json.to_string(),
-            revision.get("contentMarkdown").and_then(Value::as_str).unwrap_or(""),
+            markdown,
             revision.get("contentHash").and_then(Value::as_str).unwrap_or(""),
             revision.get("createdBy").and_then(Value::as_str).unwrap_or("remote"),
             revision.get("createdAt").and_then(Value::as_str).unwrap_or(""), tags.to_string(),
-            revision.get("contentText").and_then(Value::as_str).unwrap_or(""),
+            content_text,
         ],
     ).map_err(|e| e.to_string())?;
     Ok(json!({ "ok": true }))
@@ -293,6 +320,9 @@ pub(crate) fn merge_memos(database: &Connection, params: &Value) -> Result<Value
     let mut tags = Vec::<String>::new();
     for id in &ids {
         let row = database.query_row("SELECT m.title, m.notebook_id, c.content_markdown, m.tags_json, c.content_text, c.content_json FROM memos m JOIN memo_contents c ON c.memo_id = m.id WHERE m.id = ?1 AND m.is_deleted = 0", [id], |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?, row.get::<_, String>(5)?))).map_err(|e| e.to_string())?;
+        if has_encrypted_note_marker(&row.2) {
+            return Err("Encrypted notes cannot be merged.".to_owned());
+        }
         if first_notebook_id.is_none() {
             first_notebook_id = Some(row.1);
         }
@@ -531,23 +561,37 @@ pub(crate) fn create_memo(database: &Connection, params: &Value) -> Result<Value
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
+    let encrypted = has_encrypted_note_marker(&markdown);
     let tags = params.get("tags").cloned().unwrap_or_else(|| json!([]));
-    let content_json = params
-        .get("contentJson")
-        .cloned()
-        .unwrap_or_else(|| markdown_doc(&markdown));
+    let content_json = if encrypted {
+        empty_doc_json()
+    } else {
+        params
+            .get("contentJson")
+            .cloned()
+            .unwrap_or_else(|| markdown_doc(&markdown))
+    };
     let content_json_text = content_json.to_string();
-    let text = params
-        .get("contentText")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| markdown.lines().collect::<Vec<_>>().join(" "));
+    let text = if encrypted {
+        String::new()
+    } else {
+        params
+            .get("contentText")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| markdown.lines().collect::<Vec<_>>().join(" "))
+    };
+    let excerpt = if encrypted {
+        String::new()
+    } else {
+        text.chars().take(180).collect::<String>()
+    };
     let id = now_id("memo_local");
     let hash = content_hash(&markdown, &content_json_text);
     let tx = database
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
-    tx.execute("INSERT INTO memos (id, notebook_id, title, excerpt, tags_json, created_by, updated_by) VALUES (?1, ?2, ?3, ?4, ?5, 'desktop', 'desktop')", rusqlite::params![id, notebook_id, if title.is_empty() { None } else { Some(title.clone()) }, text.chars().take(180).collect::<String>(), tags.to_string()]).map_err(|e| e.to_string())?;
+    tx.execute("INSERT INTO memos (id, notebook_id, title, excerpt, tags_json, created_by, updated_by) VALUES (?1, ?2, ?3, ?4, ?5, 'desktop', 'desktop')", rusqlite::params![id, notebook_id, if title.is_empty() { None } else { Some(title.clone()) }, excerpt, tags.to_string()]).map_err(|e| e.to_string())?;
     tx.execute("INSERT INTO memo_contents (memo_id, content_json, content_markdown, content_text, content_hash) VALUES (?1, ?2, ?3, ?4, ?5)", rusqlite::params![id, content_json_text, markdown, text, hash]).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     let memo = memo_value(database, &id, true)?;
@@ -595,26 +639,40 @@ pub(crate) fn update_memo(database: &Connection, params: &Value) -> Result<Value
         .unwrap_or("")
         .trim()
         .to_owned();
-    let content_json = params.get("contentJson").cloned().unwrap_or_else(|| {
-        markdown_doc(
-            params
-                .get("contentMarkdown")
-                .and_then(Value::as_str)
-                .unwrap_or(""),
-        )
-    });
-    let content_json_text = content_json.to_string();
     let markdown = params
         .get("contentMarkdown")
         .and_then(Value::as_str)
         .or_else(|| previous.get("contentMarkdown").and_then(Value::as_str))
         .unwrap_or("")
         .to_owned();
-    let text = params
-        .get("contentText")
-        .and_then(Value::as_str)
-        .unwrap_or(&markdown)
-        .to_owned();
+    let is_encrypted = has_encrypted_note_marker(&markdown);
+    let content_json = if is_encrypted {
+        empty_doc_json()
+    } else {
+        params.get("contentJson").cloned().unwrap_or_else(|| {
+            markdown_doc(
+                params
+                    .get("contentMarkdown")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+        })
+    };
+    let content_json_text = content_json.to_string();
+    let text = if is_encrypted {
+        String::new()
+    } else {
+        params
+            .get("contentText")
+            .and_then(Value::as_str)
+            .unwrap_or(&markdown)
+            .to_owned()
+    };
+    let excerpt = if is_encrypted {
+        String::new()
+    } else {
+        text.chars().take(180).collect::<String>()
+    };
     let tags = params.get("tags").cloned().unwrap_or_else(|| json!([]));
     let hash = content_hash(&markdown, &content_json_text);
     let tx = database
@@ -654,8 +712,34 @@ pub(crate) fn update_memo(database: &Connection, params: &Value) -> Result<Value
             );
         }
     }
-    insert_revision(&tx, &previous, "desktop")?;
-    let changed = tx.execute("UPDATE memos SET title = ?2, excerpt = ?3, tags_json = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = 'desktop' WHERE id = ?1 AND is_deleted = 0", rusqlite::params![memo_id, if title.is_empty() { None } else { Some(title) }, text.chars().take(180).collect::<String>(), tags.to_string()]).map_err(|e| e.to_string())?;
+    let was_encrypted = has_encrypted_note_marker(
+        previous
+            .get("contentMarkdown")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    if guarded.is_some() && (was_encrypted || is_encrypted) {
+        return Err(
+            "ENCRYPTED_NOTE_FORBIDDEN: Encrypted notes cannot be modified by plugins.".to_owned(),
+        );
+    }
+    if !was_encrypted && is_encrypted {
+        let active_resources: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM resources WHERE memo_id = ?1 AND is_deleted = 0",
+                [&memo_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if active_resources > 0 {
+            return Err("Notes with images or attachments cannot be encrypted yet.".to_owned());
+        }
+        tx.execute("DELETE FROM memo_revisions WHERE memo_id = ?1", [&memo_id])
+            .map_err(|e| e.to_string())?;
+    } else {
+        insert_revision(&tx, &previous, "desktop")?;
+    }
+    let changed = tx.execute("UPDATE memos SET title = ?2, excerpt = ?3, tags_json = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = 'desktop' WHERE id = ?1 AND is_deleted = 0", rusqlite::params![memo_id, if title.is_empty() { None } else { Some(title) }, excerpt, tags.to_string()]).map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err(format!("Memo not found or deleted: {memo_id}"));
     }
@@ -778,29 +862,67 @@ pub(crate) fn restore_memo_revision(
         .unwrap_or("")
         .trim()
         .to_owned();
-    let content_json = revision
-        .get("contentJson")
-        .cloned()
-        .unwrap_or_else(|| json!({"type":"doc","content":[]}));
-    let content_json_text = content_json.to_string();
     let markdown = revision
         .get("contentMarkdown")
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let text = revision
-        .get("contentText")
-        .and_then(Value::as_str)
-        .unwrap_or(&markdown)
-        .to_owned();
+    let is_encrypted = has_encrypted_note_marker(&markdown);
+    let was_encrypted = has_encrypted_note_marker(
+        current
+            .get("contentMarkdown")
+            .and_then(Value::as_str)
+            .unwrap_or(""),
+    );
+    let content_json = if is_encrypted {
+        empty_doc_json()
+    } else {
+        revision
+            .get("contentJson")
+            .cloned()
+            .unwrap_or_else(|| json!({"type":"doc","content":[]}))
+    };
+    let content_json_text = content_json.to_string();
+    let text = if is_encrypted {
+        String::new()
+    } else {
+        revision
+            .get("contentText")
+            .and_then(Value::as_str)
+            .unwrap_or(&markdown)
+            .to_owned()
+    };
+    let excerpt = if is_encrypted {
+        String::new()
+    } else {
+        text.chars().take(180).collect::<String>()
+    };
     let tags = revision.get("tags").cloned().unwrap_or_else(|| json!([]));
     let hash = content_hash(&markdown, &content_json_text);
     let next_revision = current.get("revision").and_then(Value::as_i64).unwrap_or(0) + 1;
     let tx = database
         .unchecked_transaction()
         .map_err(|e| e.to_string())?;
-    insert_revision(&tx, &current, "desktop")?;
-    tx.execute("UPDATE memos SET title = ?2, excerpt = ?3, tags_json = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = 'desktop' WHERE id = ?1", rusqlite::params![memo_id, if title.is_empty() { None } else { Some(title.clone()) }, text.chars().take(180).collect::<String>(), tags.to_string()]).map_err(|e| e.to_string())?;
+    if !was_encrypted && is_encrypted {
+        let active_resources: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM resources WHERE memo_id = ?1 AND is_deleted = 0",
+                [&memo_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+        if active_resources > 0 {
+            return Err("Notes with images or attachments cannot be encrypted yet.".to_owned());
+        }
+        tx.execute(
+            "DELETE FROM memo_revisions WHERE memo_id = ?1 AND instr(content_markdown, '```edgeever-encrypted-note') = 0",
+            [&memo_id],
+        )
+        .map_err(|e| e.to_string())?;
+    } else {
+        insert_revision(&tx, &current, "desktop")?;
+    }
+    tx.execute("UPDATE memos SET title = ?2, excerpt = ?3, tags_json = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = 'desktop' WHERE id = ?1", rusqlite::params![memo_id, if title.is_empty() { None } else { Some(title.clone()) }, excerpt, tags.to_string()]).map_err(|e| e.to_string())?;
     tx.execute("UPDATE memo_contents SET content_json = ?2, content_markdown = ?3, content_text = ?4, content_hash = ?5, revision = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE memo_id = ?1", rusqlite::params![memo_id, content_json_text, markdown, text, hash, next_revision]).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     enqueue_change(

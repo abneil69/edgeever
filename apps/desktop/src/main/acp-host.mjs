@@ -417,7 +417,10 @@ export function buildPromptContent({ prompt, contextText, historyText, backgroun
   const request = typeof prompt === "string" ? prompt : "";
   const sections = [];
   if (typeof backgroundInstructions === "string" && backgroundInstructions.length > 0) sections.push(`## Background tool rules\n${backgroundInstructions}`);
-  if (typeof contextText === "string" && contextText.length > 0) sections.push(`## Application context\n${contextText}`);
+  const hasEncryptedMarker = /(?:`{3,}|~{3,})[ \t]*edgeever-encrypted-note(?=$|[\s`~:-])/i;
+  if (typeof contextText === "string" && contextText.length > 0 && !hasEncryptedMarker.test(contextText)) {
+    sections.push(`## Application context\n${contextText}`);
+  }
   if (typeof historyText === "string" && historyText.length > 0) sections.push(`## Previous conversation (reference only)\n${historyText}`);
   const list = Array.isArray(attachments) ? attachments : [];
   list.forEach((attachment, index) => {

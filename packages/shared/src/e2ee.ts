@@ -31,11 +31,14 @@ export type E2eeCryptoErrorCode =
   | "decryption_failed";
 
 export class E2eeCryptoError extends Error {
+  readonly code: E2eeCryptoErrorCode;
+
   constructor(
-    public readonly code: E2eeCryptoErrorCode,
+    code: E2eeCryptoErrorCode,
     message: string,
   ) {
     super(message);
+    this.code = code;
     this.name = "E2eeCryptoError";
   }
 }

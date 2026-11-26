@@ -4,11 +4,14 @@ import {
   createExcerpt,
   docToMarkdown,
   docToText,
+  emptyDoc,
+  hasEncryptedNoteMarker,
   hasSyncCursorRewound,
   hasSyncStateReset,
   markdownToDoc,
   mergeMemoDocs,
   getDiagramSummary,
+  getEncryptedNoteSummary,
   getInfographicSummary,
   getPosterSummary,
   getTableSummary,
@@ -79,24 +82,38 @@ const setMeta = async (scope: string, key: string, value: string) => {
   await localDb.syncMeta.put({ scope, key, value, updatedAt: new Date().toISOString() });
 };
 
-const toSummary = (memo: MemoDetail): MemoSummary => ({
-  id: memo.id,
-  notebookId: memo.notebookId,
-  title: memo.title,
-  excerpt: memo.excerpt,
-  ...getDiagramSummary(memo.contentMarkdown),
-  ...getInfographicSummary(memo.contentMarkdown),
-  ...getPosterSummary(memo.contentMarkdown),
-  ...getTableSummary(memo.contentMarkdown),
-  tags: memo.tags,
-  isPinned: memo.isPinned,
-  isArchived: memo.isArchived,
-  isDeleted: memo.isDeleted,
-  revision: memo.revision,
-  createdAt: memo.createdAt,
-  updatedAt: memo.updatedAt,
-  deletedAt: memo.deletedAt,
-});
+const sanitizeMemoForLocalMirror = (memo: MemoDetail): MemoDetail => {
+  if (!hasEncryptedNoteMarker(memo.contentMarkdown)) return memo;
+  return {
+    ...memo,
+    excerpt: "",
+    contentText: "",
+    contentJson: emptyDoc(),
+  };
+};
+
+const toSummary = (memo: MemoDetail): MemoSummary => {
+  const encrypted = hasEncryptedNoteMarker(memo.contentMarkdown);
+  return {
+    id: memo.id,
+    notebookId: memo.notebookId,
+    title: memo.title,
+    excerpt: encrypted ? "" : memo.excerpt,
+    ...(encrypted ? {} : getDiagramSummary(memo.contentMarkdown)),
+    ...(encrypted ? {} : getInfographicSummary(memo.contentMarkdown)),
+    ...(encrypted ? {} : getPosterSummary(memo.contentMarkdown)),
+    ...(encrypted ? {} : getTableSummary(memo.contentMarkdown)),
+    ...getEncryptedNoteSummary(memo.contentMarkdown),
+    tags: memo.tags,
+    isPinned: memo.isPinned,
+    isArchived: memo.isArchived,
+    isDeleted: memo.isDeleted,
+    revision: memo.revision,
+    createdAt: memo.createdAt,
+    updatedAt: memo.updatedAt,
+    deletedAt: memo.deletedAt,
+  };
+};
 
 const replaceScope = async (scope: string, notebooks: Notebook[], memos: MemoDetail[]) => {
   await localDb.transaction("rw", [localDb.notebooks, localDb.memos, localDb.revisions, localDb.resources], async () => {
@@ -107,19 +124,25 @@ const replaceScope = async (scope: string, notebooks: Notebook[], memos: MemoDet
     await localDb.revisions.where("scope").equals(scope).delete();
     await localDb.resources.where("scope").equals(scope).delete();
     await localDb.notebooks.bulkPut(notebooks.map((notebook) => ({ ...notebook, scope })));
-    await localDb.memos.bulkPut(memos.map((memo) => ({ ...memo, scope })));
+    await localDb.memos.bulkPut(memos.map((memo) => ({ ...sanitizeMemoForLocalMirror(memo), scope })));
     await localDb.resources.bulkPut(pendingLocalResources);
   });
 };
 
 const applyChanges = async (scope: string, changes: SyncChangesResponse["changes"]) => {
-  await localDb.transaction("rw", [localDb.notebooks, localDb.memos], async () => {
+  await localDb.transaction("rw", [localDb.notebooks, localDb.memos, localDb.revisions, localDb.drafts], async () => {
     for (const change of changes) {
       if (change.entityType === "memo") {
         if (change.operation === "delete" || !change.memo) {
           await localDb.memos.delete([scope, change.entityId]);
         } else {
-          await localDb.memos.put({ ...change.memo, scope });
+          const previous = await localDb.memos.get([scope, change.entityId]);
+          const next = sanitizeMemoForLocalMirror(change.memo);
+          await localDb.memos.put({ ...next, scope });
+          if (hasEncryptedNoteMarker(next.contentMarkdown) && (!previous || !hasEncryptedNoteMarker(previous.contentMarkdown))) {
+            await localDb.revisions.where("scope").equals(scope).filter((rev) => rev.memoId === change.entityId).delete();
+            await localDb.drafts.delete(change.entityId);
+          }
         }
         continue;
       }
@@ -262,7 +285,12 @@ export const listLocalMemos = async (scope: string, params: LocalMemoListParams)
     if (params.filter === "tagged" && memo.tags.length === 0) return false;
     if (params.filter === "untagged" && memo.tags.length > 0) return false;
     if (params.filter === "pinned" && !memo.isPinned) return false;
-    if (q && ![memo.title || DEFAULT_MEMO_TITLE, memo.excerpt, memo.contentText, memo.tags.join(" ")].some((value) => value?.toLocaleLowerCase().includes(q))) return false;
+    if (q) {
+      const searchableFields = hasEncryptedNoteMarker(memo.contentMarkdown)
+        ? [memo.title || DEFAULT_MEMO_TITLE, memo.tags.join(" ")]
+        : [memo.title || DEFAULT_MEMO_TITLE, memo.excerpt, memo.contentText, memo.tags.join(" ")];
+      if (!searchableFields.some((value) => value?.toLocaleLowerCase().includes(q))) return false;
+    }
     return true;
   });
 
@@ -295,7 +323,7 @@ export const getLocalMemo = async (scope: string, memoId: string) => {
 };
 
 export const putLocalMemo = async (scope: string, memo: MemoDetail) => {
-  await localDb.memos.put({ ...memo, scope });
+  await localDb.memos.put({ ...sanitizeMemoForLocalMirror(memo), scope });
 };
 
 export const isLocalMemoId = (memoId: string) => memoId.startsWith("local_");
@@ -313,14 +341,15 @@ export const createLocalMemo = async (
   },
 ) => {
   const now = new Date().toISOString();
-  const contentJson = input.contentJson ?? markdownToDoc(input.contentMarkdown ?? "");
+  const encrypted = hasEncryptedNoteMarker(input.contentMarkdown);
+  const contentJson = encrypted ? emptyDoc() : (input.contentJson ?? markdownToDoc(input.contentMarkdown ?? ""));
   const contentMarkdown = input.contentMarkdown ?? docToMarkdown(contentJson);
-  const contentText = docToText(contentJson);
+  const contentText = encrypted ? "" : docToText(contentJson);
   const memo: MemoDetail = {
     id: `local_${createClientUuid()}`,
     notebookId: input.notebookId,
     title: input.title?.trim() || null,
-    excerpt: createExcerpt(contentText),
+    excerpt: encrypted ? "" : createExcerpt(contentText),
     tags: input.tags ?? [],
     isPinned: false,
     isArchived: false,
@@ -435,19 +464,35 @@ export const putLocalMemoUpdate = async (
   memo: MemoDetail,
   input: { title: string; contentJson: TiptapDoc; contentMarkdown?: string; tags: string[] },
 ) => {
-  const contentText = docToText(input.contentJson);
+  const nextMarkdown = input.contentMarkdown ?? docToMarkdown(input.contentJson);
+  const isEncrypted = hasEncryptedNoteMarker(nextMarkdown);
+  const wasEncrypted = hasEncryptedNoteMarker(memo.contentMarkdown);
+  const contentJson = isEncrypted ? emptyDoc() : input.contentJson;
+  const contentText = isEncrypted ? "" : docToText(contentJson);
   const updatedMemo: MemoDetail = {
     ...memo,
     title: input.title.trim() || null,
-    excerpt: createExcerpt(contentText),
+    excerpt: isEncrypted ? "" : createExcerpt(contentText),
     tags: input.tags,
-    contentJson: input.contentJson,
-    contentMarkdown: input.contentMarkdown ?? docToMarkdown(input.contentJson),
+    contentJson,
+    contentMarkdown: nextMarkdown,
     contentText,
     updatedAt: new Date().toISOString(),
   };
   await putLocalMemo(scope, updatedMemo);
+  if (isEncrypted && !wasEncrypted) {
+    await localDb.revisions
+      .where("scope")
+      .equals(scope)
+      .filter((rev) => rev.memoId === memo.id && !hasEncryptedNoteMarker(rev.contentMarkdown))
+      .delete();
+    await localDb.drafts.delete(memo.id);
+  }
   return updatedMemo;
+};
+
+export const deleteLocalMemoRevisions = async (scope: string, memoId: string) => {
+  await localDb.revisions.where("scope").equals(scope).filter((rev) => rev.memoId === memoId).delete();
 };
 
 export const putLocalNotebook = async (scope: string, notebook: Notebook) => {
@@ -807,6 +852,9 @@ export const applyLocalEmptyTrash = async (scope: string) => {
 export const mergeLocalMemos = async (scope: string, input: { memoIds: string[]; notebookId?: string; title?: string }) => {
   const sources = (await Promise.all(input.memoIds.map((memoId) => getLocalMemo(scope, memoId)))).filter((memo): memo is MemoDetail => Boolean(memo));
   if (sources.length < 2) return null;
+  if (sources.some((memo) => hasEncryptedNoteMarker(memo.contentMarkdown))) {
+    throw new Error("Encrypted notes cannot be merged.");
+  }
   const sourceDocs = sources.map((memo) => {
     const doc = resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
     if (!docToText(doc).trim() && memo.contentText.trim()) {

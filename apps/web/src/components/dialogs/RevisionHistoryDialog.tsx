@@ -7,7 +7,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } f
 import { cn, formatDateTime } from "@/lib/utils";
 import { getMemoTitle } from "@/lib/app-helpers";
 import { AppConfirmDialog } from "./ConfirmDialogs";
-import { buildRevisionDiffRows, type MemoDetail } from "@edgeever/shared";
+import { buildRevisionDiffRows, hasEncryptedNoteMarker, type MemoDetail } from "@edgeever/shared";
+import { e2eeSession, useE2eeSession } from "@/lib/e2ee";
 import type { EdgeEverRepository } from "@/lib/repository";
 
 const formatRevisionActor = (actor: string) => {
@@ -36,6 +37,7 @@ export const RevisionHistoryDialog = ({
   onRestored: (memo: MemoDetail) => Promise<void>;
 }) => {
   const { t } = useTranslation();
+  const e2ee = useE2eeSession();
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
   const [restoreRevisionConfirmationId, setRestoreRevisionConfirmationId] = useState<string | null>(null);
 
@@ -48,9 +50,32 @@ export const RevisionHistoryDialog = ({
   const selectedRevision =
     revisions.find((revision) => revision.id === selectedRevisionId) ?? revisions[0] ?? null;
 
+  const [decryptedRevisionMarkdown, setDecryptedRevisionMarkdown] = useState<string>("");
+
+  useEffect(() => {
+    const raw = selectedRevision?.contentMarkdown ?? "";
+    if (!selectedRevision || !hasEncryptedNoteMarker(raw)) {
+      setDecryptedRevisionMarkdown(raw);
+      return;
+    }
+    if (!e2ee.unlocked) {
+      setDecryptedRevisionMarkdown("");
+      return;
+    }
+    let cancelled = false;
+    void e2eeSession.decryptMemo(memo.id, raw)
+      .then((result) => {
+        if (!cancelled) setDecryptedRevisionMarkdown(result.plaintextMarkdown);
+      })
+      .catch(() => {
+        if (!cancelled) setDecryptedRevisionMarkdown(t("e2ee.encryptedRevisionDecryptFailed"));
+      });
+    return () => { cancelled = true; };
+  }, [e2ee.unlocked, memo.id, selectedRevision, t]);
+
   const diffRows = useMemo(
-    () => buildRevisionDiffRows(selectedRevision?.contentMarkdown ?? "", currentMarkdown),
-    [currentMarkdown, selectedRevision?.contentMarkdown]
+    () => buildRevisionDiffRows(decryptedRevisionMarkdown, currentMarkdown),
+    [currentMarkdown, decryptedRevisionMarkdown]
   );
 
   const diffSummary = useMemo(() => {

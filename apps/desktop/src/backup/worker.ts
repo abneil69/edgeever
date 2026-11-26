@@ -9,11 +9,12 @@ import { createEdgeEverClient } from "../../../../packages/client/src/index";
 import { createEdgeEverZipStream, parseEdgeEverZip, restoreEdgeEverZip, validateBackupRelationships, type JsonBackupSource } from "../../../../packages/shared/src/backup-archive";
 import type { JsonBackupManifest } from "../../../../packages/shared/src/backup";
 import type { AuthSession, Notebook, Resource, AiPromptTemplate } from "../../../../packages/shared/src/types";
+import type { WorkspaceE2eeKeyring } from "../../../../packages/shared/src/e2ee";
 import { encryptArchive, decryptArchive } from "./encrypted-archive.mjs";
 
 type Context = { baseUrl: string; accountId: string | null; token: string; locale?: string };
 type Input = { operation: "export" | "import" | "verify"; context: Context; path: string; password?: string; stagingDirectory?: string; previousState?: SourceState; version?: { edgeeverVersion: string; buildId: string } };
-type State = { protocolVersion: number; userId: string | null; workspaceId: string; identity: string; backupRevision: string; counts: Required<JsonBackupManifest["counts"]> };
+type State = { protocolVersion: number; userId: string | null; workspaceId: string; identity: string; backupRevision: string; counts: Required<JsonBackupManifest["counts"]>; hasE2eeKeyring?: boolean };
 type SourceState = Pick<State, "identity" | "workspaceId" | "backupRevision">;
 const { data, port: parentPort, request: networkFetch } = await backupWorkerRuntime();
 const input = data as Input;
@@ -123,6 +124,11 @@ const runExport = async () => {
     signal, resourceOrigin: input.context.baseUrl,
     listNotebooks: async () => ({ notebooks: await collect<Notebook>("notebooks") }),
     listPrompts: async () => ({ prompts: await collect<AiPromptTemplate>("prompts") }),
+    getE2eeKeyring: async () => {
+      if (!state.hasE2eeKeyring) return { e2eeKeyring: null };
+      const result = await page<{ e2eeKeyring: WorkspaceE2eeKeyring | null; nextCursor: null }>("e2ee-keyring", "");
+      return { e2eeKeyring: result.e2eeKeyring ?? null };
+    },
     getPage: async (offset) => {
       const result = await page<Awaited<ReturnType<JsonBackupSource["getPage"]>> & { nextCursor: string | null }>("memos", cursor);
       resourceByUrl.clear();
@@ -236,7 +242,8 @@ const runImport = async () => {
     });
     await restoreEdgeEverZip(backup, {
       restoreNotebooks: client.restoreJsonNotebooks, restoreMemos: client.restoreJsonMemos,
-      restorePrompts: client.restoreJsonAiPrompts, createResourceRestoreSink: client.createJsonResourceRestoreSink,
+      restorePrompts: client.restoreJsonAiPrompts, restoreE2eeKeyring: client.restoreJsonE2eeKeyring,
+      createResourceRestoreSink: client.createJsonResourceRestoreSink,
     }, (progress) => send("progress", { stage: "restoring", ...progress }));
     return { manifest: backup.manifest };
   } finally { await archive?.close(); await rm(staged, { force: true }); }

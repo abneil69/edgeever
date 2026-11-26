@@ -166,6 +166,7 @@ export type AiSidebarFocus = {
   notebookId?: string;
   notebookTitle?: string;
   noteTitle?: string;
+  encrypted?: boolean;
   selectionMarkdown?: string;
   contentMarkdown?: string;
 };
@@ -665,6 +666,7 @@ function AiSidebarSession({
   open,
   onOpenChange,
   companionAvailable,
+  encrypted = false,
   selectionMarkdown,
   selectionPin,
   selectionRequest,
@@ -748,8 +750,10 @@ function AiSidebarSession({
   const imagesByTurn = useRef(new Map<string, Map<string, LocalImage>>());
   localTurnsRef.current = localTurns;
   localThreadIdRef.current = localThreadId;
-  const focusRef = useRef({ selectionMarkdown, contentMarkdown, memoId, notebookId, notebookTitle, noteTitle, companionAvailable });
-  focusRef.current = { selectionMarkdown, contentMarkdown, memoId, notebookId, notebookTitle, noteTitle, companionAvailable };
+  const safeSelectionMarkdown = encrypted ? "" : selectionMarkdown;
+  const safeContentMarkdown = encrypted ? "" : contentMarkdown;
+  const focusRef = useRef({ encrypted, selectionMarkdown: safeSelectionMarkdown, contentMarkdown: safeContentMarkdown, memoId, notebookId, notebookTitle, noteTitle, companionAvailable });
+  focusRef.current = { encrypted, selectionMarkdown: safeSelectionMarkdown, contentMarkdown: safeContentMarkdown, memoId, notebookId, notebookTitle, noteTitle, companionAvailable };
 
   useEffect(() => {
     setIncludeCurrentNote(false);
@@ -1771,7 +1775,7 @@ function AiSidebarSession({
             busy={running}
             locked={acting || selectionPending}
             includeCurrentNote={includeCurrentNote}
-            currentNoteAvailable={Boolean(noteTitle?.trim() || contentMarkdown?.trim())}
+            currentNoteAvailable={!encrypted && Boolean(noteTitle?.trim() || safeContentMarkdown?.trim())}
             onIncludeCurrentNoteChange={setIncludeCurrentNote}
             placeholder={t("aiAssistant.sidebar.placeholder")}
             onAddFiles={(files) => { void addFiles(files); }}

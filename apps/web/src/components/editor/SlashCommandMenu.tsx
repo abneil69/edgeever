@@ -282,14 +282,22 @@ const runSlashCommand = ({
 
 export const createSlashCommandExtension = ({
   actions,
+  getDisabledIds,
   getLabels,
 }: {
   actions: SlashCommandActions;
+  getDisabledIds?: () => ReadonlySet<SlashCommandId>;
   getLabels: () => SlashCommandLabels;
 }) => Extension.create({
   name: "edgeeverSlashCommand",
   addProseMirrorPlugins() {
-    const initialItems = createSlashCommandItems(getLabels());
+    const filterDisabled = (items: SlashCommandItem[]) => {
+      const disabled = getDisabledIds?.();
+      return disabled && disabled.size > 0
+        ? items.filter((item) => !disabled.has(item.id))
+        : items;
+    };
+    const initialItems = filterDisabled(createSlashCommandItems(getLabels()));
     return [Suggestion<SlashCommandItem, SlashCommandItem>({
       editor: this.editor,
       pluginKey: slashCommandPluginKey,
@@ -303,7 +311,7 @@ export const createSlashCommandExtension = ({
         const position = state.doc.resolve(range.from);
         return this.editor.isEditable && position.parent.type.name === "paragraph";
       },
-      items: ({ query }) => filterSlashCommandItems(createSlashCommandItems(getLabels()), query),
+      items: ({ query }) => filterSlashCommandItems(filterDisabled(createSlashCommandItems(getLabels())), query),
       command: ({ editor, range, props }) => runSlashCommand({ actions, editor, item: props, range }),
       render: () => {
         let renderer: ReactRenderer<SlashCommandMenuHandle, SlashCommandMenuProps> | null = null;

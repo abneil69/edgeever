@@ -23,6 +23,7 @@ import type { MarkdownSourceEditorRef } from "./MarkdownSourceEditor";
 import { getMarkdownSearchMatches } from "./markdown-source-search";
 
 type EditorNoteSearchControllerOptions = {
+  disabled?: boolean;
   markdownMode: boolean;
   markdownSource: string;
   markdownSourceEditorRef: RefObject<MarkdownSourceEditorRef | null>;
@@ -49,6 +50,7 @@ const getEditorSearchMatches = (editor: Editor | null, query: string): NoteSearc
 };
 
 export const useEditorNoteSearchController = ({
+  disabled = false,
   markdownMode,
   markdownSource,
   markdownSourceEditorRef,
@@ -70,8 +72,18 @@ export const useEditorNoteSearchController = ({
   const noteSearchInputRef = useRef<HTMLInputElement | null>(null);
   const automaticSelectionRef = useRef<{ editor: Editor; identity: string } | null>(null);
   const previousEditorInstanceKeyRef = useRef(editorInstanceKey);
+  const effectiveContentSearchQuery = disabled ? "" : contentSearchQuery;
   // Reset on a real note switch, not when desktop sync remaps a local id.
   // The editor instance key stays stable across that handoff.
+  if (
+    disabled && (noteSearchOpen || noteSearchQuery || noteSearchReplaceOpen || noteSearchReplacement || noteSearchIndex !== 0)
+  ) {
+    setNoteSearchOpen(CLOSED_NOTE_SEARCH_STATE.open);
+    setNoteSearchQuery(CLOSED_NOTE_SEARCH_STATE.query);
+    setNoteSearchReplaceOpen(CLOSED_NOTE_SEARCH_STATE.replaceOpen);
+    setNoteSearchReplacement(CLOSED_NOTE_SEARCH_STATE.replacement);
+    setNoteSearchIndex(CLOSED_NOTE_SEARCH_STATE.index);
+  }
   if (shouldResetNoteSearchForMemoChange(previousEditorInstanceKeyRef.current, editorInstanceKey)) {
     previousEditorInstanceKeyRef.current = editorInstanceKey;
     setNoteSearchOpen(CLOSED_NOTE_SEARCH_STATE.open);
@@ -82,12 +94,16 @@ export const useEditorNoteSearchController = ({
   }
 
   const noteSearchMatches = useMemo(
-    () => markdownMode ? getMarkdownSearchMatches(markdownSource, noteSearchQuery) : getEditorSearchMatches(editor, noteSearchQuery),
-    [dirtyVersion, editor, markdownMode, markdownSource, memoId, noteSearchQuery],
+    () => disabled
+      ? []
+      : (markdownMode ? getMarkdownSearchMatches(markdownSource, noteSearchQuery) : getEditorSearchMatches(editor, noteSearchQuery)),
+    [dirtyVersion, disabled, editor, markdownMode, markdownSource, memoId, noteSearchQuery],
   );
   const contentSearchMatches = useMemo(
-    () => markdownMode ? getMarkdownSearchMatches(markdownSource, contentSearchQuery) : getEditorSearchMatches(editor, contentSearchQuery),
-    [contentSearchQuery, dirtyVersion, editor, markdownMode, markdownSource, memoId],
+    () => disabled
+      ? []
+      : (markdownMode ? getMarkdownSearchMatches(markdownSource, effectiveContentSearchQuery) : getEditorSearchMatches(editor, effectiveContentSearchQuery)),
+    [disabled, dirtyVersion, editor, effectiveContentSearchQuery, markdownMode, markdownSource, memoId],
   );
 
   const selectMatch = useCallback(
@@ -134,12 +150,12 @@ export const useEditorNoteSearchController = ({
   );
 
   useEffect(() => {
-    if (markdownMode || !isEditorReady(editor)) {
+    if (disabled || markdownMode || !isEditorReady(editor)) {
       return;
     }
 
     const searchHighlightPlugin = createNoteSearchHighlightPlugin({
-      getQuery: () => noteSearchOpen ? noteSearchQuery : contentSearchQuery,
+      getQuery: () => noteSearchOpen ? noteSearchQuery : effectiveContentSearchQuery,
       getActiveIndex: () => noteSearchOpen ? noteSearchIndex : 0,
     });
 
@@ -150,7 +166,7 @@ export const useEditorNoteSearchController = ({
         editor.unregisterPlugin(NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY);
       }
     };
-  }, [contentSearchQuery, editor, markdownMode, noteSearchIndex, noteSearchOpen, noteSearchQuery]);
+  }, [disabled, editor, effectiveContentSearchQuery, markdownMode, noteSearchIndex, noteSearchOpen, noteSearchQuery]);
 
   const focusSearchInput = useCallback(() => {
     window.requestAnimationFrame(() => {
@@ -160,34 +176,37 @@ export const useEditorNoteSearchController = ({
   }, [noteSearchInputRef]);
 
   const openSearch = useCallback((showReplace = false) => {
+    if (disabled) return;
     setNoteSearchOpen(true);
     setNoteSearchReplaceOpen(showReplace);
     focusSearchInput();
-  }, [focusSearchInput]);
+  }, [disabled, focusSearchInput]);
 
   const openFromSelection = useCallback((text: string, showReplace = false) => {
+    if (disabled) return;
     setNoteSearchQuery(text);
     setNoteSearchOpen(true);
     setNoteSearchReplaceOpen(showReplace);
     focusSearchInput();
-  }, [focusSearchInput]);
+  }, [disabled, focusSearchInput]);
 
   const openWithQuery = useCallback((query: string) => {
+    if (disabled) return;
     setNoteSearchQuery(query);
     setNoteSearchIndex(0);
     setNoteSearchReplaceOpen(false);
     setNoteSearchOpen(true);
     window.requestAnimationFrame(() => noteSearchInputRef.current?.focus());
-  }, []);
+  }, [disabled]);
 
   const closeReplace = useCallback(() => {
     setNoteSearchReplaceOpen(false);
   }, []);
 
   const openReplace = useCallback(() => {
-    if (readOnly) return;
+    if (disabled || readOnly) return;
     openSearch(true);
-  }, [openSearch, readOnly]);
+  }, [disabled, openSearch, readOnly]);
 
   const closeSearch = useCallback(() => {
     setNoteSearchOpen(false);
@@ -317,27 +336,29 @@ export const useEditorNoteSearchController = ({
   ]);
 
   return {
-    highlightQuery: noteSearchOpen ? noteSearchQuery : contentSearchQuery,
-    highlightIndex: noteSearchOpen ? noteSearchIndex : 0,
+    highlightQuery: disabled ? "" : (noteSearchOpen ? noteSearchQuery : effectiveContentSearchQuery),
+    highlightIndex: disabled ? 0 : (noteSearchOpen ? noteSearchIndex : 0),
     closeReplace,
     closeSearch,
     inputRef: noteSearchInputRef,
-    matchLabel: formatNoteSearchMatchLabel(
-      noteSearchQuery,
-      noteSearchIndex,
-      noteSearchMatches.length,
-    ),
+    matchLabel: disabled
+      ? ""
+      : formatNoteSearchMatchLabel(
+          noteSearchQuery,
+          noteSearchIndex,
+          noteSearchMatches.length,
+        ),
     matches: noteSearchMatches,
     moveMatch,
     openFromSelection,
     openReplace,
     openSearch,
     openWithQuery,
-    query: noteSearchQuery,
+    query: disabled ? "" : noteSearchQuery,
     replaceAllMatches,
-    replaceOpen: noteSearchReplaceOpen,
-    replacement: noteSearchReplacement,
-    searchOpen: noteSearchOpen,
+    replaceOpen: disabled ? false : noteSearchReplaceOpen,
+    replacement: disabled ? "" : noteSearchReplacement,
+    searchOpen: disabled ? false : noteSearchOpen,
     setQuery: setNoteSearchQuery,
     setReplacement: setNoteSearchReplacement,
   };
