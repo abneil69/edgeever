@@ -645,6 +645,9 @@ export const createWebRepository = (scope: string): EdgeEverRepository => {
       if (isOffline()) throw new Error("Revision is not available offline");
       return api.restoreMemoRevision(memoId, revisionId);
     }
+    if (hasEncryptedNoteMarker(memo.contentMarkdown) && !hasEncryptedNoteMarker(revision.contentMarkdown)) {
+      throw new Error("encrypted_memo_decrypt_requires_intent: Restoring a plaintext revision onto an encrypted note requires explicit decryption.");
+    }
     const contentJson = hasEncryptedNoteMarker(revision.contentMarkdown)
       ? emptyDoc()
       : markdownToDoc(revision.contentMarkdown);

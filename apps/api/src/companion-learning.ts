@@ -21,7 +21,7 @@ export async function learnCompanionPreferences(db: DatabaseAdapter, scope: Comp
   const events = (await db.prepare(`SELECT a.rowid AS cursor, a.id, a.entity_id, a.metadata_json, a.created_at
     FROM audit_events a
     JOIN memos m ON m.id = a.entity_id AND m.workspace_id = ? AND m.is_deleted = 0
-    JOIN memo_contents mc ON mc.memo_id = m.id AND instr(mc.content_markdown, '\`\`\`edgeever-encrypted-note') = 0
+    JOIN memo_contents mc ON mc.memo_id = m.id AND substr(mc.content_markdown, 1, 27) <> '\`\`\`edgeever-encrypted-note' || char(10)
     WHERE a.rowid > ? AND a.actor_id = ? AND a.actor_type = 'user' AND a.action IN ('memo.move', 'memo.update', 'tag.add', 'tag.remove')
     ORDER BY a.rowid LIMIT 50`).bind(scope.workspaceId, settings.learning_cursor, scope.ownerId)
     .all<{ cursor: number; id: string; entity_id: string; metadata_json: string; created_at: string }>()).results;

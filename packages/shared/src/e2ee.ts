@@ -165,16 +165,61 @@ export type WorkspaceE2eeKeyringUpsertPayload = WorkspaceE2eeKeyringParams & {
   expectedRevision?: number;
 };
 
-const ENCRYPTED_NOTE_MARKER_PATTERN = /(?:`{3,}|~{3,})[ \t]*edgeever-encrypted-note(?=$|[\s`~:-])/i;
+const ENCRYPTED_NOTE_FENCE_PREFIX_PATTERN = /^(?:`{3,}|~{3,})[ \t]*edgeever-encrypted-note(?=$|[\s`~:-])/i;
 const STRICT_ENCRYPTED_NOTE_BLOCK_PATTERN = /^```edgeever-encrypted-note\n([^\n`]+)\n```$/;
+const ENCRYPTED_NOTE_OPEN_FENCE = `\`\`\`${ENCRYPTED_NOTE_FENCE_LANGUAGE}`;
+const ENCRYPTED_NOTE_CLOSE_FENCE = "```";
 
-export const hasEncryptedNoteMarker = (markdown: string | null | undefined): boolean =>
-  Boolean(markdown && ENCRYPTED_NOTE_MARKER_PATTERN.test(markdown));
+export const hasEncryptedNoteFencePrefix = (markdown: string | null | undefined): boolean =>
+  Boolean(markdown && ENCRYPTED_NOTE_FENCE_PREFIX_PATTERN.test(markdown.trimStart()));
+
+/**
+ * Cheap O(1) read-side structural check for stored/synced encrypted notes.
+ * Verifies only that the trimmed document begins with the exact opening fence
+ * followed by a newline, ends with a newline followed by the closing fence,
+ * and has non-empty content between them—never matching fences mid-body and
+ * never parsing/copying multi-megabyte ciphertexts on hot read paths.
+ * Write boundaries must use `parseEncryptedNoteEnvelope` / `isValidEncryptedNoteEnvelope`.
+ */
+export const hasEncryptedNoteMarker = (markdown: string | null | undefined): boolean => {
+  if (!markdown) return false;
+  const trimmed = markdown.trim();
+  if (!trimmed.startsWith(ENCRYPTED_NOTE_OPEN_FENCE) || !trimmed.endsWith(ENCRYPTED_NOTE_CLOSE_FENCE)) {
+    return false;
+  }
+  const openLen = ENCRYPTED_NOTE_OPEN_FENCE.length;
+  let bodyStart = openLen;
+  const firstBreak = trimmed.charCodeAt(bodyStart);
+  if (firstBreak === 13 /* \r */) {
+    bodyStart += 1;
+    if (trimmed.charCodeAt(bodyStart) === 10 /* \n */) {
+      bodyStart += 1;
+    }
+  } else if (firstBreak === 10 /* \n */) {
+    bodyStart += 1;
+  } else {
+    return false;
+  }
+  let bodyEnd = trimmed.length - ENCRYPTED_NOTE_CLOSE_FENCE.length;
+  if (bodyEnd <= bodyStart) return false;
+  const lastBreak = trimmed.charCodeAt(bodyEnd - 1);
+  if (lastBreak === 10 /* \n */) {
+    bodyEnd -= 1;
+    if (bodyEnd > bodyStart && trimmed.charCodeAt(bodyEnd - 1) === 13 /* \r */) {
+      bodyEnd -= 1;
+    }
+  } else if (lastBreak === 13 /* \r */) {
+    bodyEnd -= 1;
+  } else {
+    return false;
+  }
+  return bodyEnd > bodyStart;
+};
 
 export const parseEncryptedNoteEnvelope = (
   markdown: string | null | undefined,
 ): EncryptedNoteEnvelope | null => {
-  if (!markdown) return null;
+  if (!hasEncryptedNoteMarker(markdown) || !markdown) return null;
   const normalized = markdown.replace(/\r\n?/g, "\n").trim();
   const match = STRICT_ENCRYPTED_NOTE_BLOCK_PATTERN.exec(normalized);
   if (!match) return null;
@@ -186,6 +231,9 @@ export const parseEncryptedNoteEnvelope = (
     return null;
   }
 };
+
+export const isValidEncryptedNoteEnvelope = (markdown: string | null | undefined): boolean =>
+  parseEncryptedNoteEnvelope(markdown) !== null;
 
 export const serializeEncryptedNoteEnvelope = (envelope: EncryptedNoteEnvelope): string => {
   const safe = EncryptedNoteEnvelopeSchema.parse(envelope);
@@ -619,12 +667,20 @@ export const unwrapNoteDek = async (
     throw new E2eeCryptoError("invalid_envelope", "Encrypted note envelope has invalid DEK fields.");
   }
 
-  const dekAad = buildNoteDekAad(input.memoId, envelope.keyId);
-  const dek = await provider.aesGcmDecrypt(input.masterKey, dekIv, wrappedDek, dekAad);
-  if (dek.byteLength !== WORKSPACE_E2EE_KEY_BYTES) {
-    throw new E2eeCryptoError("decryption_failed", "Unwrapped note DEK has an unexpected length.");
+  // Copy caller-owned key bytes before the first await so concurrent zeroization
+  // (e.g. session lock or logout) cannot corrupt in-flight crypto operations.
+  const masterKeyCopy = input.masterKey.slice();
+  try {
+    const dekAad = buildNoteDekAad(input.memoId, envelope.keyId);
+    const dek = await provider.aesGcmDecrypt(masterKeyCopy, dekIv, wrappedDek, dekAad);
+    if (dek.byteLength !== WORKSPACE_E2EE_KEY_BYTES) {
+      zeroizeBytes(dek);
+      throw new E2eeCryptoError("decryption_failed", "Unwrapped note DEK has an unexpected length.");
+    }
+    return dek;
+  } finally {
+    zeroizeBytes(masterKeyCopy);
   }
-  return dek;
 };
 
 export const encryptNoteContent = async (
@@ -647,70 +703,81 @@ export const encryptNoteContent = async (
   assertValidKeyId(input.keyId);
   assertValidSymmetricKey(input.masterKey, "masterKey");
 
-  let dek: Uint8Array;
-  let wrappedDekBase64: string;
-  let dekIvBase64: string;
+  // Copy caller-owned keys synchronously before any await so concurrent
+  // zeroization cannot cause encryption with an all-zero key.
+  const masterKeyCopy = input.masterKey.slice();
+  let workingDek: Uint8Array | null = null;
+  let wrappedDekBase64 = "";
+  let dekIvBase64 = "";
+  let plaintextBytes: Uint8Array | null = null;
 
-  if (input.noteKey && input.noteKey.keyId === input.keyId) {
-    assertValidSymmetricKey(input.noteKey.dek, "note DEK");
-    if (
-      !decodeBase64ExactBytes(input.noteKey.wrappedDek, WORKSPACE_E2EE_WRAPPED_KEY_BYTES)
-      || !decodeBase64ExactBytes(input.noteKey.dekIv, WORKSPACE_E2EE_IV_BYTES)
-    ) {
-      throw new E2eeCryptoError("invalid_envelope", "Cached note DEK binding has invalid fields.");
+  try {
+    if (input.noteKey && input.noteKey.keyId === input.keyId) {
+      assertValidSymmetricKey(input.noteKey.dek, "note DEK");
+      if (
+        !decodeBase64ExactBytes(input.noteKey.wrappedDek, WORKSPACE_E2EE_WRAPPED_KEY_BYTES)
+        || !decodeBase64ExactBytes(input.noteKey.dekIv, WORKSPACE_E2EE_IV_BYTES)
+      ) {
+        throw new E2eeCryptoError("invalid_envelope", "Cached note DEK binding has invalid fields.");
+      }
+      workingDek = input.noteKey.dek.slice();
+      wrappedDekBase64 = input.noteKey.wrappedDek;
+      dekIvBase64 = input.noteKey.dekIv;
+    } else if (input.existingEnvelope && input.existingEnvelope.keyId === input.keyId) {
+      workingDek = await unwrapNoteDek(
+        {
+          memoId: input.memoId,
+          masterKey: masterKeyCopy,
+          envelope: input.existingEnvelope,
+          expectedKeyId: input.keyId,
+        },
+        provider,
+      );
+      wrappedDekBase64 = input.existingEnvelope.wrappedDek;
+      dekIvBase64 = input.existingEnvelope.dekIv;
+    } else {
+      workingDek = await provider.randomBytes(WORKSPACE_E2EE_KEY_BYTES);
+      assertValidSymmetricKey(workingDek, "note DEK");
+      const dekIv = await provider.randomBytes(WORKSPACE_E2EE_IV_BYTES);
+      const dekAad = buildNoteDekAad(input.memoId, input.keyId);
+      const wrappedDek = await provider.aesGcmEncrypt(masterKeyCopy, dekIv, workingDek, dekAad);
+      wrappedDekBase64 = encodeBase64(wrappedDek);
+      dekIvBase64 = encodeBase64(dekIv);
     }
-    dek = input.noteKey.dek;
-    wrappedDekBase64 = input.noteKey.wrappedDek;
-    dekIvBase64 = input.noteKey.dekIv;
-  } else if (input.existingEnvelope && input.existingEnvelope.keyId === input.keyId) {
-    dek = await unwrapNoteDek(
-      {
-        memoId: input.memoId,
-        masterKey: input.masterKey,
-        envelope: input.existingEnvelope,
-        expectedKeyId: input.keyId,
-      },
-      provider,
-    );
-    wrappedDekBase64 = input.existingEnvelope.wrappedDek;
-    dekIvBase64 = input.existingEnvelope.dekIv;
-  } else {
-    dek = await provider.randomBytes(WORKSPACE_E2EE_KEY_BYTES);
-    assertValidSymmetricKey(dek, "note DEK");
-    const dekIv = await provider.randomBytes(WORKSPACE_E2EE_IV_BYTES);
-    const dekAad = buildNoteDekAad(input.memoId, input.keyId);
-    const wrappedDek = await provider.aesGcmEncrypt(input.masterKey, dekIv, dek, dekAad);
-    wrappedDekBase64 = encodeBase64(wrappedDek);
-    dekIvBase64 = encodeBase64(dekIv);
-  }
 
-  // Always generate a fresh 12-byte random IV for every body encryption.
-  const bodyIv = await provider.randomBytes(WORKSPACE_E2EE_IV_BYTES);
-  const bodyAad = buildNoteBodyAad(input.memoId, input.keyId);
-  const plaintextBytes = textEncoder.encode(input.plaintextMarkdown);
-  const ciphertext = await provider.aesGcmEncrypt(dek, bodyIv, plaintextBytes, bodyAad);
+    // Always generate a fresh 12-byte random IV for every body encryption.
+    const bodyIv = await provider.randomBytes(WORKSPACE_E2EE_IV_BYTES);
+    const bodyAad = buildNoteBodyAad(input.memoId, input.keyId);
+    plaintextBytes = textEncoder.encode(input.plaintextMarkdown);
+    const ciphertext = await provider.aesGcmEncrypt(workingDek, bodyIv, plaintextBytes, bodyAad);
 
-  const envelope: EncryptedNoteEnvelope = {
-    v: ENCRYPTED_NOTE_ENVELOPE_VERSION,
-    alg: ENCRYPTED_NOTE_AEAD_ALGORITHM,
-    keyId: input.keyId,
-    wrappedDek: wrappedDekBase64,
-    dekIv: dekIvBase64,
-    iv: encodeBase64(bodyIv),
-    ciphertext: encodeBase64(ciphertext),
-  };
-
-  return {
-    envelope,
-    markdown: serializeEncryptedNoteEnvelope(envelope),
-    dek,
-    noteKey: {
+    const envelope: EncryptedNoteEnvelope = {
+      v: ENCRYPTED_NOTE_ENVELOPE_VERSION,
+      alg: ENCRYPTED_NOTE_AEAD_ALGORITHM,
       keyId: input.keyId,
-      dek,
       wrappedDek: wrappedDekBase64,
       dekIv: dekIvBase64,
-    },
-  };
+      iv: encodeBase64(bodyIv),
+      ciphertext: encodeBase64(ciphertext),
+    };
+
+    const resultDek = workingDek.slice();
+    return {
+      envelope,
+      markdown: serializeEncryptedNoteEnvelope(envelope),
+      dek: resultDek,
+      noteKey: {
+        keyId: input.keyId,
+        dek: resultDek,
+        wrappedDek: wrappedDekBase64,
+        dekIv: dekIvBase64,
+      },
+    };
+  } finally {
+    zeroizeBytes(masterKeyCopy);
+    zeroizeBytes(workingDek);
+    zeroizeBytes(plaintextBytes);
+  }
 };
 
 export const decryptNoteContent = async (
@@ -727,6 +794,8 @@ export const decryptNoteContent = async (
   dek: Uint8Array;
   noteKey: NoteDekBinding;
 }> => {
+  assertNonEmptyId(input.memoId, "memoId");
+  assertValidSymmetricKey(input.masterKey, "masterKey");
   const envelope =
     typeof input.envelopeOrMarkdown === "string"
       ? parseEncryptedNoteEnvelope(input.envelopeOrMarkdown)
@@ -739,40 +808,50 @@ export const decryptNoteContent = async (
     throw new E2eeCryptoError("invalid_envelope", "Encrypted note envelope is invalid.");
   }
 
-  const dek = await unwrapNoteDek(
-    {
-      memoId: input.memoId,
-      masterKey: input.masterKey,
-      envelope,
-      expectedKeyId: input.expectedKeyId,
-    },
-    provider,
-  );
-
   const bodyIv = decodeBase64ExactBytes(envelope.iv, WORKSPACE_E2EE_IV_BYTES);
   const ciphertext = decodeBase64Strict(envelope.ciphertext);
   if (!bodyIv || !ciphertext) {
     throw new E2eeCryptoError("invalid_envelope", "Encrypted note envelope has invalid body fields.");
   }
 
-  const bodyAad = buildNoteBodyAad(input.memoId, envelope.keyId);
-  const plaintextBytes = await provider.aesGcmDecrypt(dek, bodyIv, ciphertext, bodyAad);
-  let plaintextMarkdown: string;
+  const masterKeyCopy = input.masterKey.slice();
+  let dek: Uint8Array | null = null;
+  let plaintextBytes: Uint8Array | null = null;
   try {
-    plaintextMarkdown = textDecoder.decode(plaintextBytes);
-  } catch {
-    throw new E2eeCryptoError("decryption_failed", "Decrypted note body is not valid UTF-8.");
-  }
+    dek = await unwrapNoteDek(
+      {
+        memoId: input.memoId,
+        masterKey: masterKeyCopy,
+        envelope,
+        expectedKeyId: input.expectedKeyId,
+      },
+      provider,
+    );
 
-  return {
-    plaintextMarkdown,
-    envelope,
-    dek,
-    noteKey: {
-      keyId: envelope.keyId,
-      dek,
-      wrappedDek: envelope.wrappedDek,
-      dekIv: envelope.dekIv,
-    },
-  };
+    const bodyAad = buildNoteBodyAad(input.memoId, envelope.keyId);
+    plaintextBytes = await provider.aesGcmDecrypt(dek, bodyIv, ciphertext, bodyAad);
+    let plaintextMarkdown: string;
+    try {
+      plaintextMarkdown = textDecoder.decode(plaintextBytes);
+    } catch {
+      throw new E2eeCryptoError("decryption_failed", "Decrypted note body is not valid UTF-8.");
+    }
+
+    const resultDek = dek.slice();
+    return {
+      plaintextMarkdown,
+      envelope,
+      dek: resultDek,
+      noteKey: {
+        keyId: envelope.keyId,
+        dek: resultDek,
+        wrappedDek: envelope.wrappedDek,
+        dekIv: envelope.dekIv,
+      },
+    };
+  } finally {
+    zeroizeBytes(masterKeyCopy);
+    zeroizeBytes(dek);
+    zeroizeBytes(plaintextBytes);
+  }
 };

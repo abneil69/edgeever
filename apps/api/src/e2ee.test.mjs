@@ -10,6 +10,7 @@ import {
   emptyDoc,
   encodeBase64,
   encryptNoteContent,
+  hasEncryptedNoteMarker,
   initializeWorkspaceKeyring,
   rotateWorkspacePassphrase,
   serializePosterDocument,
@@ -197,7 +198,8 @@ const setupFixture = (options = {}) => {
     mergeMemos: mergeMemosRecord,
     moveMemos: moveMemosRecord,
     restoreMemo: restoreMemoRecord,
-    restoreMemoRevision: (...args) => restoreMemoRevision(...args, { getMemoDetail, getMemoDetailRow }),
+    restoreMemoRevision: (db, wsId, memoId, revId, actor, actorLabel, options) =>
+      restoreMemoRevision(db, wsId, memoId, revId, actor, actorLabel, { getMemoDetail, getMemoDetailRow }, options),
     updateMemo: updateMemoRecord,
   });
 
@@ -339,7 +341,7 @@ describe("E2EE memo lifecycle, FTS5 isolation, and trace cleanup", () => {
     const f = setupFixture();
     const actor = { actorType: "user", actorId: "usr_owner" };
 
-    // Creating a memo with a malformed/mixed encrypted marker fails with 400.
+    // Creating a memo with a fence-prefixed malformed envelope fails with 400.
     await expect(
       createMemoRecord(
         f.db,
@@ -347,12 +349,30 @@ describe("E2EE memo lifecycle, FTS5 isolation, and trace cleanup", () => {
         {
           notebookId: NOTEBOOK_ID,
           title: "Bad Envelope",
-          contentMarkdown: "Prefix\n```edgeever-encrypted-note\n{\"v\":1}\n```",
+          contentMarkdown: "```edgeever-encrypted-note\n{\"v\":1}\n```",
         },
         actor,
         "user:usr_owner",
       ),
     ).rejects.toMatchObject({ code: "invalid_encrypted_memo", status: 400 });
+
+    // Ordinary plaintext note quoting an encrypted fence mid-body saves & indexes normally.
+    const docWithFence = await createMemoRecord(
+      f.db,
+      WORKSPACE_ID,
+      {
+        notebookId: NOTEBOOK_ID,
+        title: "E2EE Spec Guide",
+        contentMarkdown: "Prefix with FenceGuideToken\n```edgeever-encrypted-note\n{\"v\":1}\n```",
+      },
+      actor,
+      "user:usr_owner",
+    );
+    expect(docWithFence.encrypted).toBeFalsy();
+    expect(docWithFence.excerpt).toContain("FenceGuideToken");
+    const foundFenceDoc = await listMemos(f.db, { workspaceId: WORKSPACE_ID, query: "FenceGuideToken" });
+    expect(foundFenceDoc.memos.map((m) => m.id)).toEqual([docWithFence.id]);
+    await deleteMemoRecord(f.env, WORKSPACE_ID, docWithFence.id, false, actor);
 
     // Create a plaintext note with >=200 chars, edit it to produce a revision, and create a public share with slug.
     const longPlaintext = `TopSecretKeywordInBody ${"x".repeat(250)}`;
@@ -959,15 +979,33 @@ describe("E2EE revision restore plaintext cleanup & cross-instance ZIP backup/re
       "user:usr_owner",
     );
 
-    // 2. Decrypt to plaintext (snapshots encV1 into memo_revisions).
-    await updateMemoRecord(
+    // Silent downgrade (encrypted -> plaintext without explicit e2eeTransition) MUST be rejected with 409.
+    const silentDecrypt = await updateMemoRecord(
       f.db,
       WORKSPACE_ID,
       memo.id,
-      { contentMarkdown: "Plaintext edit 1 with PlainSecretA", updatedAt: "2026-11-26T02:00:00.000Z" },
+      { contentMarkdown: "Unintentional overwrite from legacy client", updatedAt: "2026-11-26T01:30:00.000Z" },
       actor,
       "user:usr_owner",
     );
+    expect(silentDecrypt.error).toBe("encrypted_memo_decrypt_requires_intent");
+    expect(silentDecrypt.status).toBe(409);
+
+    // 2. Explicit decrypt to plaintext (snapshots encV1 into memo_revisions).
+    const decryptedOk = await updateMemoRecord(
+      f.db,
+      WORKSPACE_ID,
+      memo.id,
+      {
+        contentMarkdown: "Plaintext edit 1 with PlainSecretA\n```edgeever-encrypted-note\nexample\n```",
+        e2eeTransition: "decrypt",
+        updatedAt: "2026-11-26T02:00:00.000Z",
+      },
+      actor,
+      "user:usr_owner",
+    );
+    expect("memo" in decryptedOk).toBe(true);
+    expect(decryptedOk.memo.encrypted).toBeFalsy();
 
     // 3. Edit plaintext again >= 5 min later (snapshots Plaintext edit 1 into memo_revisions).
     await updateMemoRecord(
@@ -990,7 +1028,7 @@ describe("E2EE revision restore plaintext cleanup & cross-instance ZIP backup/re
 
     const revsBeforeRestore = await listMemoRevisions(f.db, WORKSPACE_ID, memo.id, 50, getMemoDetail);
     expect(revsBeforeRestore.length).toBe(2);
-    const encryptedRevision = revsBeforeRestore.find((r) => r.contentMarkdown.includes("```edgeever-encrypted-note"));
+    const encryptedRevision = revsBeforeRestore.find((r) => hasEncryptedNoteMarker(r.contentMarkdown));
     expect(encryptedRevision).toBeDefined();
 
     // 4. Restore back to the encrypted revision.
@@ -1018,6 +1056,38 @@ describe("E2EE revision restore plaintext cleanup & cross-instance ZIP backup/re
     // Shares and slug claims must be removed as well.
     expect(f.sqlite.prepare("SELECT COUNT(*) AS count FROM memo_shares WHERE memo_id = ?").get(memo.id).count).toBe(0);
     expect(f.sqlite.prepare("SELECT COUNT(*) AS count FROM memo_share_slug_claims WHERE slug = 'temp-plain-slug'").get().count).toBe(0);
+
+    // 5. Restoring a plaintext revision onto an encrypted note requires explicit e2eeTransition: "decrypt".
+    f.sqlite
+      .prepare(
+        `INSERT INTO memo_revisions (id, memo_id, revision, title, content_json, content_markdown, content_hash, created_by, created_at, tags_json, content_text)
+         VALUES ('rev_legacy_plain', ?, 0, 'Toggle Note', '{"type":"doc","content":[{"type":"paragraph"}]}', 'Legacy plaintext revision', 'hash_legacy', 'user:usr_owner', '2026-11-26T00:00:00.000Z', '[]', 'Legacy plaintext revision')`,
+      )
+      .run(memo.id);
+    await expect(
+      restoreMemoRevision(
+        f.db,
+        WORKSPACE_ID,
+        memo.id,
+        "rev_legacy_plain",
+        actor,
+        "user:usr_owner",
+        { getMemoDetail, getMemoDetailRow },
+      ),
+    ).rejects.toMatchObject({ code: "encrypted_memo_decrypt_requires_intent", status: 409 });
+
+    const explicitRestoredPlain = await restoreMemoRevision(
+      f.db,
+      WORKSPACE_ID,
+      memo.id,
+      "rev_legacy_plain",
+      actor,
+      "user:usr_owner",
+      { getMemoDetail, getMemoDetailRow },
+      { e2eeTransition: "decrypt" },
+    );
+    expect(explicitRestoredPlain.encrypted).toBeFalsy();
+    expect(explicitRestoredPlain.contentMarkdown).toBe("Legacy plaintext revision");
   });
 
   test("exports from ws_source to ZIP and restores into a brand-new ws_target instance with full passphrase unlock and note decryption", async () => {

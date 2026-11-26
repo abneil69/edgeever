@@ -15,6 +15,7 @@ import {
   sanitizeNoteProseCss,
   parsePublishedNoteBodyFont,
   resolveMemoContentDoc,
+  hasEncryptedNoteMarker,
   type NotebookShare,
   type PublicNotebookShare,
   type PublicMemoShare,
@@ -106,7 +107,7 @@ export const registerNotebookShareRoutes = (app: Hono<AppEnv>) => {
     const conditions = [
       "m.is_deleted = 0",
       "m.id > ?",
-      "NOT EXISTS (SELECT 1 FROM memo_contents emc WHERE emc.memo_id = m.id AND instr(emc.content_markdown, '\`\`\`edgeever-encrypted-note') > 0)",
+      "NOT EXISTS (SELECT 1 FROM memo_contents emc WHERE emc.memo_id = m.id AND substr(emc.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10))",
     ];
     const binds: unknown[] = [share.token, c.req.query("cursor") ?? ""];
     if (visibility !== "all") conditions.push(`${visibility === "public" ? "NOT " : ""}${excludedSql}`);
@@ -200,7 +201,7 @@ export const registerNotebookShareRoutes = (app: Hono<AppEnv>) => {
       const target = await db.prepare(
         `SELECT content_markdown FROM memo_contents WHERE memo_id = ?`,
       ).bind(memoId).first<{ content_markdown: string }>();
-      if (target && target.content_markdown.includes("\`\`\`edgeever-encrypted-note")) {
+      if (target && hasEncryptedNoteMarker(target.content_markdown)) {
         return apiError(c, "encrypted_memo_share_forbidden", "Encrypted notes cannot be published to a public notebook site.", 409);
       }
       await db.prepare("DELETE FROM notebook_share_excluded_memos WHERE share_id = ? AND memo_id = ?").bind(share.id, memoId).run();

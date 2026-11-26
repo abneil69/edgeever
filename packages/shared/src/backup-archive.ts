@@ -1,5 +1,5 @@
 import { EDGEEVER_ZIP_FORMAT, EDGEEVER_ZIP_FORMAT_VERSION, JsonBackupManifestSchema, JsonBackupAiPromptSchema, JsonBackupMemoSchema, JsonBackupNotebookSchema, type JsonBackupManifest, type JsonBackupAiPrompt, type JsonBackupMemo, type JsonBackupNotebook, type JsonBackupResource, type JsonBackupRevision } from "./backup";
-import { hasEncryptedNoteMarker, parseEncryptedNoteEnvelope, type WorkspaceE2eeKeyring } from "./e2ee";
+import { hasEncryptedNoteFencePrefix, parseEncryptedNoteEnvelope, type WorkspaceE2eeKeyring } from "./e2ee";
 import { WorkspaceE2eeKeyringSchema } from "./schemas";
 import type { MemoDetail, Notebook, Resource } from "./types";
 import { Reader, ZipReader, ZipWriter, Uint8ArrayReader, type CreateReadableOptions } from "@zip.js/zip.js/index-native.js";
@@ -489,7 +489,7 @@ export const validateBackupRelationships = (backup: ParsedEdgeEverZip) => {
   const keyring = backup.e2eeKeyring ?? null;
   for (const item of backup.memos) {
     if (!notebooks.has(item.memo.notebookId)) invalid();
-    if (hasEncryptedNoteMarker(item.memo.contentMarkdown)) {
+    if (hasEncryptedNoteFencePrefix(item.memo.contentMarkdown)) {
       const envelope = parseEncryptedNoteEnvelope(item.memo.contentMarkdown);
       if (!envelope) invalid();
       if (item.resources.length > 0) invalid();
@@ -497,7 +497,7 @@ export const validateBackupRelationships = (backup: ParsedEdgeEverZip) => {
     }
     for (const revision of item.revisions) {
       if (revision.memoId !== item.memo.id || revisions.has(revision.id)) invalid();
-      if (hasEncryptedNoteMarker(revision.contentMarkdown)) {
+      if (hasEncryptedNoteFencePrefix(revision.contentMarkdown)) {
         const revEnvelope = parseEncryptedNoteEnvelope(revision.contentMarkdown);
         if (!revEnvelope) invalid();
         if (keyring && revEnvelope!.keyId !== keyring.keyId) invalid();

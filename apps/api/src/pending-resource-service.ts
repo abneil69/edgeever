@@ -611,7 +611,7 @@ export const preparePendingResourceBinding = async (
       LEFT JOIN pending_resources p
         ON p.id = ? AND p.workspace_id = ? AND p.state = 'uploaded' AND p.expires_at > ?
       LEFT JOIN memos m ON m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0
-      LEFT JOIN memo_contents mc ON mc.memo_id = m.id AND instr(mc.content_markdown, '\`\`\`edgeever-encrypted-note') = 0`,
+      LEFT JOIN memo_contents mc ON mc.memo_id = m.id AND substr(mc.content_markdown, 1, 27) <> '\`\`\`edgeever-encrypted-note' || char(10)`,
     ).bind(id, now, now, id, auth.workspaceId, now, memoId, auth.workspaceId),
     db.prepare("DELETE FROM pending_resources WHERE id = ? AND workspace_id = ?").bind(id, auth.workspaceId),
     auditStatement(db, actor.actorType, actor.actorId, "resource.bind", "resource", id, { memoId }),

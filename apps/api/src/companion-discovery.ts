@@ -90,7 +90,7 @@ export async function listDiscoveries(db: DatabaseAdapter, scope: CompanionScope
       for (const source of sources) {
         const memo = await db.prepare(`SELECT m.notebook_id, c.revision FROM memos m JOIN memo_contents c ON c.memo_id = m.id
           WHERE m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0
-            AND instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') = 0`).bind(source.id, scope.workspaceId)
+            AND substr(c.content_markdown, 1, 27) <> '\`\`\`edgeever-encrypted-note' || char(10)`).bind(source.id, scope.workspaceId)
           .first<{ notebook_id: string; revision: number }>();
         if (!memo || memo.revision !== source.revision || memo.notebook_id !== source.notebookId) { valid = false; break; }
       }

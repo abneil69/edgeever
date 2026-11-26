@@ -1,6 +1,7 @@
 import {
   DeleteMemosSchema,
   DuplicateMemoSchema,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
   MemoCreateSchema,
   MergeMemosSchema,
@@ -116,6 +117,7 @@ type MemoRouteDependencies = {
     revisionId: string,
     actor: AuditActor,
     actorLabel: string,
+    options?: { e2eeTransition?: "decrypt" },
   ) => Promise<MemoDetail>;
   updateMemo: (
     database: DatabaseAdapter,
@@ -239,7 +241,7 @@ export const registerMemoRoutes = (
     if (!(file instanceof File) || !notebookId || !contentMarkdown.includes("EDGEVERRESOURCEID")) {
       return badRequest(context, "notebookId, contentMarkdown, and an image file are required.");
     }
-    if (hasEncryptedNoteMarker(contentMarkdown)) {
+    if (hasEncryptedNoteMarker(contentMarkdown) || hasEncryptedNoteFencePrefix(contentMarkdown)) {
       return apiError(
         context,
         "encrypted_memo_resources_forbidden",
@@ -438,6 +440,8 @@ export const registerMemoRoutes = (
         await resolveRequestNotebookAccess(context),
         "restore this memo's revision",
       );
+      const body = await context.req.json().catch(() => null) as { e2eeTransition?: unknown } | null;
+      const e2eeTransition = body?.e2eeTransition === "decrypt" ? "decrypt" : undefined;
       const memo = await dependencies.restoreMemoRevision(
         context.env.storage.db,
         getWorkspaceId(context),
@@ -445,6 +449,7 @@ export const registerMemoRoutes = (
         context.req.param("revisionId"),
         getAuditActor(context),
         getActorLabel(context),
+        e2eeTransition ? { e2eeTransition } : undefined,
       );
       return context.json({ memo });
     } catch (error) {

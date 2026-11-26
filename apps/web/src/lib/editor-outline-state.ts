@@ -30,6 +30,15 @@ export const writeOutlineSnapshot = (memoId: string, snapshot: OutlineSnapshot) 
   }
 };
 
+export const removeOutlineSnapshot = (memoId: string) => {
+  unsaved.delete(memoId);
+  try {
+    window.localStorage.removeItem(storageKey(memoId));
+  } catch {
+    // Ignore storage unavailability when clearing cached heading state.
+  }
+};
+
 // Transactions preserve identity through renames, duplicate titles and position
 // shifts without adding attributes to the user's document. Deleted headings
 // must never transfer their state to a replacement at the same position.

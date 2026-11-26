@@ -4,9 +4,10 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
-  hasEncryptedNoteMarker,
+  hasEncryptedNoteFencePrefix,
   normalizeTags,
   parseEncryptedNoteEnvelope,
+  serializeEncryptedNoteEnvelope,
   WORKSPACE_E2EE_KDF_ALGORITHM,
   WorkspaceE2eeKeyringSchema,
   type JsonBackupMemo,
@@ -273,15 +274,15 @@ export const restoreJsonMemos = async (
   for (const backup of backups) {
     const parsedJson = parseBackupDoc(backup.memo.contentJson);
     const contentMarkdown = backup.memo.contentMarkdown || docToMarkdown(parsedJson);
-    if (hasEncryptedNoteMarker(contentMarkdown)) {
-      const envelope = parseEncryptedNoteEnvelope(contentMarkdown);
-      if (!envelope) {
-        throw new AppError(
-          "invalid_encrypted_memo",
-          "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
-          400,
-        );
-      }
+    const envelope = parseEncryptedNoteEnvelope(contentMarkdown);
+    if (hasEncryptedNoteFencePrefix(contentMarkdown) && !envelope) {
+      throw new AppError(
+        "invalid_encrypted_memo",
+        "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+        400,
+      );
+    }
+    if (envelope) {
       if (backup.resources.length > 0) {
         throw new AppError(
           "encrypted_memo_resources_forbidden",
@@ -302,22 +303,20 @@ export const restoreJsonMemos = async (
     for (const revision of backup.revisions) {
       const parsedRevJson = parseBackupDoc(revision.contentJson);
       const revMarkdown = revision.contentMarkdown || docToMarkdown(parsedRevJson);
-      if (hasEncryptedNoteMarker(revMarkdown)) {
-        const revEnvelope = parseEncryptedNoteEnvelope(revMarkdown);
-        if (!revEnvelope) {
-          throw new AppError(
-            "invalid_encrypted_memo",
-            "Encrypted note revision contains an invalid envelope.",
-            400,
-          );
-        }
-        if (targetKeyring && revEnvelope.keyId !== targetKeyring.key_id) {
-          throw new AppError(
-            "keyring_key_id_mismatch",
-            "Encrypted note revision keyId does not match the target workspace encryption keyring.",
-            409,
-          );
-        }
+      const revEnvelope = parseEncryptedNoteEnvelope(revMarkdown);
+      if (hasEncryptedNoteFencePrefix(revMarkdown) && !revEnvelope) {
+        throw new AppError(
+          "invalid_encrypted_memo",
+          "Encrypted note revision contains an invalid envelope.",
+          400,
+        );
+      }
+      if (revEnvelope && targetKeyring && revEnvelope.keyId !== targetKeyring.key_id) {
+        throw new AppError(
+          "keyring_key_id_mismatch",
+          "Encrypted note revision keyId does not match the target workspace encryption keyring.",
+          409,
+        );
       }
     }
   }
@@ -362,15 +361,17 @@ export const restoreJsonMemos = async (
   for (const backup of backups) {
     const memo = backup.memo;
     const parsedJson = parseBackupDoc(memo.contentJson);
-    const contentMarkdown = memo.contentMarkdown || docToMarkdown(parsedJson);
-    const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
-    if (isEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+    const rawContentMarkdown = memo.contentMarkdown || docToMarkdown(parsedJson);
+    const parsedEnvelope = parseEncryptedNoteEnvelope(rawContentMarkdown);
+    if (hasEncryptedNoteFencePrefix(rawContentMarkdown) && !parsedEnvelope) {
       throw new AppError(
         "invalid_encrypted_memo",
         "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
         400,
       );
     }
+    const isEncrypted = parsedEnvelope !== null;
+    const contentMarkdown = parsedEnvelope ? serializeEncryptedNoteEnvelope(parsedEnvelope) : rawContentMarkdown;
     const contentJson = isEncrypted ? emptyDoc() : parsedJson;
     const contentText = isEncrypted ? "" : docToText(contentJson);
     const excerpt = isEncrypted ? "" : createExcerpt(contentText);
@@ -454,8 +455,10 @@ export const restoreJsonMemos = async (
     for (let index = 0; index < backup.revisions.length; index += 50) {
       const statements = backup.revisions.slice(index, index + 50).map((revision) => {
         const parsedRevisionJson = parseBackupDoc(revision.contentJson);
-        const revisionMarkdown = revision.contentMarkdown || docToMarkdown(parsedRevisionJson);
-        const revisionEncrypted = hasEncryptedNoteMarker(revisionMarkdown);
+        const rawRevisionMarkdown = revision.contentMarkdown || docToMarkdown(parsedRevisionJson);
+        const revisionEnvelope = parseEncryptedNoteEnvelope(rawRevisionMarkdown);
+        const revisionEncrypted = revisionEnvelope !== null;
+        const revisionMarkdown = revisionEnvelope ? serializeEncryptedNoteEnvelope(revisionEnvelope) : rawRevisionMarkdown;
         const revisionJson = revisionEncrypted ? emptyDoc() : parsedRevisionJson;
         const revisionText = revisionEncrypted ? "" : docToText(revisionJson);
         return db.prepare(

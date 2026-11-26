@@ -1,7 +1,7 @@
 import { DeferredToolLoading } from "./DeferredToolLoading";
 import { DesktopAttachmentWritebacks } from "./attachments/DesktopAttachmentWritebacks";
 import { useNoteImport } from "@/lib/note-import/use-note-import";
-import type { NotebookUpdateInput } from "@edgeever/shared";
+import { hasEncryptedNoteMarker, type NotebookUpdateInput } from "@edgeever/shared";
 import { startPosterClientRenderer } from "@/lib/poster-client-render";
 import {
   lazy,
@@ -3535,6 +3535,9 @@ export const WorkspaceApp = ({
                 }
 
                 const { memo } = await repository.getMemo(memoId, memoView === "trash");
+                if (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)) {
+                  return "error";
+                }
                 const { copyMarkdownToWeChat } = await import("@/lib/wechat-copy");
                 await copyMarkdownToWeChat(memo.contentMarkdown);
                 return "copied";

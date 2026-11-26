@@ -158,6 +158,7 @@ type LocalTiptapEditorSharedProps = {
   /** Live-switchable. The same DomWebView stays mounted across viewer → editor. */
   mode?: "editor" | "viewer";
   encryptedNote?: boolean;
+  onConfirmEncryptedCopy?: () => Promise<boolean>;
   aiPromptsJson?: string;
   autoFocus?: boolean;
   onChange?: (content: EditorDoc) => Promise<void>;
@@ -666,6 +667,8 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const onDoublePressRef = useRef(props.mode === "viewer" ? props.onDoublePress : undefined);
   const encryptedNoteRef = useRef(Boolean(props.encryptedNote));
   encryptedNoteRef.current = Boolean(props.encryptedNote);
+  const onConfirmEncryptedCopyRef = useRef(props.onConfirmEncryptedCopy);
+  onConfirmEncryptedCopyRef.current = props.onConfirmEncryptedCopy;
   const onPickImageRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onPickImage);
   const onAiRequestRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiRequest);
   const onAiCancelRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiCancel);
@@ -747,7 +750,10 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   );
   const diagramViewer = isViewer && Boolean(props.mode === "viewer" && props.visualDiagramNote);
   const mermaidCodeBlockExtension = useMemo(
-    () => createMobileCodeBlockExtension(props.locale, props.theme, diagramViewer),
+    () => createMobileCodeBlockExtension(props.locale, props.theme, diagramViewer, {
+      isEncryptedNote: () => encryptedNoteRef.current,
+      onConfirmEncryptedCopy: () => onConfirmEncryptedCopyRef.current?.() ?? Promise.resolve(false),
+    }),
     [diagramViewer, props.locale, props.theme]
   );
   const searchHighlightExtension = useMemo(
@@ -2393,6 +2399,10 @@ const createMobileCodeBlockExtension = (
   locale: MobileEditorLocale,
   theme: "light" | "dark",
   hideCopyForVisualDiagram = false,
+  options?: {
+    isEncryptedNote?: () => boolean;
+    onConfirmEncryptedCopy?: () => Promise<boolean>;
+  },
 ) => CodeBlock.extend({
   addNodeView() {
     return ({ node }) => {
@@ -2431,25 +2441,26 @@ const createMobileCodeBlockExtension = (
       copyButton.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        void Clipboard.setStringAsync(currentNode.textContent).then(() => {
-          copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copied;
-          copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copied);
+        void (async () => {
+          if (options?.isEncryptedNote?.()) {
+            const confirmed = await options.onConfirmEncryptedCopy?.();
+            if (confirmed !== true) return;
+          }
+          try {
+            await Clipboard.setStringAsync(currentNode.textContent);
+            copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copied;
+            copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copied);
+          } catch {
+            copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copyFailed;
+            copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copyFailed);
+          }
           if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
           copyResetTimer = window.setTimeout(() => {
             copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copy;
             copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copy);
             copyResetTimer = null;
           }, 1800);
-        }).catch(() => {
-          copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copyFailed;
-          copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copyFailed);
-          if (copyResetTimer !== null) window.clearTimeout(copyResetTimer);
-          copyResetTimer = window.setTimeout(() => {
-            copyButton.textContent = getMobileEditorCopy(locale).codeBlock.copy;
-            copyButton.setAttribute("aria-label", getMobileEditorCopy(locale).codeBlock.copy);
-            copyResetTimer = null;
-          }, 1800);
-        });
+        })();
       });
       pre.append(code);
       wrapper.append(...(hideCopyForVisualDiagram ? [preview, pre] : [copyButton, preview, pre]));

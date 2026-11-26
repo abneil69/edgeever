@@ -172,6 +172,10 @@ export const E2eeSettingsCard = ({ demoMode }: { demoMode: boolean }) => {
               </Select>
             </div>
 
+            <p className="text-xs leading-5 text-slate-500">
+              {t("e2ee.changePassphraseNoWmkRotationNote")}
+            </p>
+
             {biometricStatus.available ? (
               <div className="flex flex-col gap-2 border-t border-slate-100 pt-3 sm:flex-row sm:items-center sm:justify-between">
                 <div className="min-w-0 space-y-0.5">

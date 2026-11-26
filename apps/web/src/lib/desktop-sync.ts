@@ -431,6 +431,7 @@ const syncOutboxItem = async (item: DesktopOutboxItem, stagedRewrites: StagedRes
       contentJson: payload.contentJson as TiptapDoc,
       contentMarkdown: typeof payload.contentMarkdown === "string" ? payload.contentMarkdown : undefined,
       tags: Array.isArray(payload.tags) ? payload.tags.filter((tag): tag is string => typeof tag === "string") : [],
+      ...(payload.e2eeTransition === "decrypt" ? { e2eeTransition: "decrypt" as const } : {}),
     });
     await acknowledge(item, data.memo);
     return data.memo;

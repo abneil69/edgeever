@@ -8,9 +8,11 @@ import {
   decryptNoteContent,
   encodeBase64,
   encryptNoteContent,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
   initializeWorkspaceKeyring,
   isSuspiciousMemoOverwrite,
+  isValidEncryptedNoteEnvelope,
   parseEncryptedNoteEnvelope,
   rotateWorkspacePassphrase,
   serializeEncryptedNoteEnvelope,
@@ -43,10 +45,14 @@ describe("e2ee envelope parsing and serialization", () => {
     expect(parseEncryptedNoteEnvelope(`\r\n${markdown.replace(/\n/g, "\r\n")}\r\n`)).toEqual(validEnvelope);
   });
 
-  test("detects forged, truncated, and mixed-content markers while rejecting them in strict parsing", () => {
+  test("separates cheap O(1) read-side marker check from strict write-side envelope validation", () => {
     const validMarkdown = serializeEncryptedNoteEnvelope(validEnvelope);
-    const malformedCases = [
-      `Intro plaintext\n\n${validMarkdown}`,
+    expect(hasEncryptedNoteMarker(validMarkdown)).toBe(true);
+    expect(isValidEncryptedNoteEnvelope(validMarkdown)).toBe(true);
+    expect(hasEncryptedNoteMarker(`\r\n${validMarkdown.replace(/\n/g, "\r\n")}\r\n`)).toBe(true);
+    expect(isValidEncryptedNoteEnvelope(`\r\n${validMarkdown.replace(/\n/g, "\r\n")}\r\n`)).toBe(true);
+
+    const fencePrefixedMalformedCases = [
       `${validMarkdown}\n\nTrailing plaintext`,
       `${validMarkdown}\n\n<!-- edgeever-poster-v1:e30 -->`,
       `${validMarkdown}\n\n${validMarkdown}`,
@@ -58,13 +64,36 @@ describe("e2ee envelope parsing and serialization", () => {
       "```edgeever-encrypted-note\n" + JSON.stringify({ ...validEnvelope, ciphertext: encodeBase64(new Uint8Array(8)) }) + "\n```",
     ];
 
-    for (const candidate of malformedCases) {
-      expect(hasEncryptedNoteMarker(candidate)).toBe(true);
+    for (const candidate of fencePrefixedMalformedCases) {
+      expect(hasEncryptedNoteFencePrefix(candidate)).toBe(true);
+      expect(isValidEncryptedNoteEnvelope(candidate)).toBe(false);
       expect(parseEncryptedNoteEnvelope(candidate)).toBeNull();
     }
 
-    // Inline code prose mention should not trigger the fenced-block marker.
+    // Cheap read-side marker rejects non-fenced, trailing-text, tilde-fenced, empty, and mid-body fences.
+    expect(hasEncryptedNoteMarker(`${validMarkdown}\n\nTrailing plaintext`)).toBe(false);
+    expect(hasEncryptedNoteMarker(`${validMarkdown}\n\n<!-- edgeever-poster-v1:e30 -->`)).toBe(false);
+    expect(hasEncryptedNoteMarker("```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\"")).toBe(false);
+    expect(hasEncryptedNoteMarker("~~~edgeever-encrypted-note\n" + JSON.stringify(validEnvelope) + "\n~~~")).toBe(false);
+    expect(hasEncryptedNoteMarker("```edgeever-encrypted-note\n\n```")).toBe(false);
+
+    // Cheap read-side marker accepts structurally fenced blocks without JSON/base64 parsing,
+    // while strict write-side validation rejects invalid payloads.
+    const structurallyFencedMalformed = "```edgeever-encrypted-note\n{\"v\":1}\n```";
+    expect(hasEncryptedNoteMarker(structurallyFencedMalformed)).toBe(true);
+    expect(isValidEncryptedNoteEnvelope(structurallyFencedMalformed)).toBe(false);
+
+    // Ordinary plaintext note mentioning or quoting an encrypted fence mid-body is NOT encrypted and NOT fence-prefixed.
+    const proseWithFence = `Intro plaintext\n\n${validMarkdown}`;
+    expect(hasEncryptedNoteFencePrefix(proseWithFence)).toBe(false);
+    expect(hasEncryptedNoteMarker(proseWithFence)).toBe(false);
+    expect(isValidEncryptedNoteEnvelope(proseWithFence)).toBe(false);
+    expect(parseEncryptedNoteEnvelope(proseWithFence)).toBeNull();
+
+    // Inline code prose mention should not trigger either check.
+    expect(hasEncryptedNoteFencePrefix("EdgeEver uses `edgeever-encrypted-note` blocks.")).toBe(false);
     expect(hasEncryptedNoteMarker("EdgeEver uses `edgeever-encrypted-note` blocks.")).toBe(false);
+    expect(isValidEncryptedNoteEnvelope("EdgeEver uses `edgeever-encrypted-note` blocks.")).toBe(false);
   });
 });
 
@@ -345,6 +374,7 @@ describe("e2ee crypto protocol", () => {
       isSuspiciousMemoOverwrite("Old title", "", "New title", "Short", {
         currentContentMarkdown: validEnvelopeMarkdown,
         nextContentMarkdown: "Short",
+        e2eeTransition: "decrypt",
       }),
     ).toBe(false);
     expect(
@@ -353,6 +383,74 @@ describe("e2ee crypto protocol", () => {
         nextContentMarkdown: "```edgeever-encrypted-note\n{bad}\n```",
       }),
     ).toBe(true);
+  });
+
+  test("concurrent zeroization of caller-owned DEK or WMK during async randomBytes never produces undecryptable ciphertext", async () => {
+    const delayedProvider = {
+      randomBytes: (len) =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(webCryptoE2eeProvider.randomBytes(len)), 15);
+        }),
+      pbkdf2Sha256: (...args) => webCryptoE2eeProvider.pbkdf2Sha256(...args),
+      aesGcmEncrypt: (...args) => webCryptoE2eeProvider.aesGcmEncrypt(...args),
+      aesGcmDecrypt: (...args) => webCryptoE2eeProvider.aesGcmDecrypt(...args),
+    };
+
+    const { masterKey, keyring } = await initializeWorkspaceKeyring({ passphrase: "race-test-passphrase" });
+    const masterKeyBackup = masterKey.slice();
+
+    const first = await encryptNoteContent(
+      {
+        memoId: "memo_race_1",
+        keyId: keyring.keyId,
+        masterKey,
+        plaintextMarkdown: "Version 1",
+      },
+      delayedProvider,
+    );
+
+    // Start a second encryption using cached noteKey, then immediately zeroize both noteKey.dek and masterKey while randomBytes is pending.
+    const pendingSecond = encryptNoteContent(
+      {
+        memoId: "memo_race_1",
+        keyId: keyring.keyId,
+        masterKey,
+        plaintextMarkdown: "Version 2 written right before lock/evict",
+        noteKey: first.noteKey,
+      },
+      delayedProvider,
+    );
+    zeroizeBytes(first.noteKey.dek);
+    zeroizeBytes(masterKey);
+
+    const second = await pendingSecond;
+    const decryptedSecond = await decryptNoteContent({
+      memoId: "memo_race_1",
+      masterKey: masterKeyBackup,
+      envelopeOrMarkdown: second.markdown,
+    });
+    expect(decryptedSecond.plaintextMarkdown).toBe("Version 2 written right before lock/evict");
+
+    // Also verify decryptNoteContent and unwrapNoteDek survive caller zeroizing masterKey immediately after invocation.
+    const masterKeyForDecrypt = masterKeyBackup.slice();
+    const delayedDecryptProvider = {
+      ...webCryptoE2eeProvider,
+      aesGcmDecrypt: async (...args) => {
+        await new Promise((resolve) => setTimeout(resolve, 15));
+        return webCryptoE2eeProvider.aesGcmDecrypt(...args);
+      },
+    };
+    const pendingDecrypt = decryptNoteContent(
+      {
+        memoId: "memo_race_1",
+        masterKey: masterKeyForDecrypt,
+        envelopeOrMarkdown: second.markdown,
+      },
+      delayedDecryptProvider,
+    );
+    zeroizeBytes(masterKeyForDecrypt);
+    const decryptedWithRace = await pendingDecrypt;
+    expect(decryptedWithRace.plaintextMarkdown).toBe("Version 2 written right before lock/evict");
   });
 
   test("ZIP archive supports optional e2ee-keyring.json and validates encrypted memo keyId relationships", async () => {

@@ -13,6 +13,7 @@ export type MobileMemoUpdatePayload = {
   isPinned?: boolean;
   notebookId?: string;
   tags?: string[];
+  e2eeTransition?: "decrypt";
 };
 
 export const createOptimisticMemo = (

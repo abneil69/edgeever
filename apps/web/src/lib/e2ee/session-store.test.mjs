@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { parseEncryptedNoteEnvelope } from "@edgeever/shared";
+import { parseEncryptedNoteEnvelope, webCryptoE2eeProvider } from "@edgeever/shared";
 import { E2eeSessionManager } from "./session-store.ts";
 
 const createMemoryStorage = () => {
@@ -139,5 +139,52 @@ describe("E2eeSessionManager", () => {
     expect(manager.getSnapshot().unlocked).toBe(false);
     expect(manager.getSnapshot().configured).toBe(false);
     expect(manager.getSnapshot().lastLockReason).toBe("account-changed");
+  });
+
+  test("lock waits for in-flight encryptMemo and concurrent decryptMemo never corrupts cached DEK", async () => {
+    const storage = createMemoryStorage();
+    const delayedProvider = {
+      randomBytes: (len) =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve(webCryptoE2eeProvider.randomBytes(len)), 15);
+        }),
+      pbkdf2Sha256: (...args) => webCryptoE2eeProvider.pbkdf2Sha256(...args),
+      aesGcmEncrypt: (...args) => webCryptoE2eeProvider.aesGcmEncrypt(...args),
+      aesGcmDecrypt: (...args) => webCryptoE2eeProvider.aesGcmDecrypt(...args),
+    };
+    const manager = new E2eeSessionManager({ storage, provider: delayedProvider });
+    manager.setScope("https://example.com|race-user");
+
+    let storedKeyring = null;
+    await manager.initializePassphrase("race-session-passphrase", async (payload) => {
+      storedKeyring = {
+        ...payload,
+        revision: 1,
+        createdAt: "2026-11-26T00:00:00.000Z",
+        updatedAt: "2026-11-26T00:00:00.000Z",
+      };
+      return { configured: true, keyring: storedKeyring };
+    });
+
+    const first = await manager.encryptMemo("memo-race", "Body v1");
+    const cachedDekRef = first.noteKey.dek;
+
+    // Concurrent decryptMemo (replaces cache entry) + encryptMemo + lock("logout") while randomBytes is pending.
+    const pendingEncrypt = manager.encryptMemo("memo-race", "Body v2 saved during lock");
+    const pendingDecrypt = manager.decryptMemo("memo-race", first.markdown);
+    const pendingLock = manager.lock("logout");
+
+    // Snapshot locks immediately to hide plaintext in UI.
+    expect(manager.getSnapshot().unlocked).toBe(false);
+
+    const [second, decFirst] = await Promise.all([pendingEncrypt, pendingDecrypt]);
+    await pendingLock;
+    expect(decFirst.plaintextMarkdown).toBe("Body v1");
+    expect(cachedDekRef.every((byte) => byte === 0)).toBe(true);
+
+    // Re-unlock and verify the ciphertext produced during concurrent lock/decrypt decrypts cleanly.
+    await manager.unlockWithPassphrase("race-session-passphrase");
+    const verified = await manager.decryptMemo("memo-race", second.markdown);
+    expect(verified.plaintextMarkdown).toBe("Body v2 saved during lock");
   });
 });

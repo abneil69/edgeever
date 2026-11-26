@@ -1,11 +1,13 @@
 import {
   hasDiagramDocumentMarker,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
   hasInfographicDocumentMarker,
   hasPosterDocumentMarker,
   hasTableDocumentMarker,
   parseEncryptedNoteEnvelope,
   parsePosterDocument,
+  serializeEncryptedNoteEnvelope,
 } from "@edgeever/shared";
 import {
   createExcerpt,
@@ -311,7 +313,7 @@ export const searchMemoSummaries = async (
                   m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
                   c.content_text,
                   (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
-                  (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
+                  (substr(c.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10)) AS is_encrypted
            FROM search_matches s
            INNER JOIN memos m ON m.id = s.memo_id
            INNER JOIN memo_contents c ON c.memo_id = m.id
@@ -336,7 +338,7 @@ export const searchMemoSummaries = async (
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
               c.content_text,
               (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
-              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
+              (substr(c.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10)) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE ${filters.join(" AND ")}
@@ -401,7 +403,7 @@ export const listMemosForMcp = async (
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
               c.content_text,
               (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
-              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
+              (substr(c.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10)) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE m.workspace_id = ? AND ${deletedFilter} AND ${posterFilter} ${accessFilter}
@@ -645,7 +647,7 @@ export const getMemosForBulkAction = async (db: DatabaseAdapter, workspaceId: st
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
               c.content_text,
-              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
+              (substr(c.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10)) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE m.workspace_id = ? AND m.is_deleted = ?
@@ -1065,15 +1067,17 @@ export const createMemoRecord = async (
     throw new AppError("not_found", "Notebook not found", 404);
   }
   const tags = normalizeTags(input.tags);
-  const contentMarkdown = input.contentMarkdown ?? "";
-  const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
-  if (isEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+  const rawContentMarkdown = input.contentMarkdown ?? "";
+  const parsedEnvelope = parseEncryptedNoteEnvelope(rawContentMarkdown);
+  if (hasEncryptedNoteFencePrefix(rawContentMarkdown) && !parsedEnvelope) {
     throw new AppError(
       "invalid_encrypted_memo",
       "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
       400,
     );
   }
+  const isEncrypted = parsedEnvelope !== null;
+  const contentMarkdown = parsedEnvelope ? serializeEncryptedNoteEnvelope(parsedEnvelope) : rawContentMarkdown;
   const contentJson = isEncrypted
     ? emptyDoc()
     : input.contentJson && typeof input.contentJson === "object"
@@ -1463,7 +1467,7 @@ export const updateMemoRecord = async (
 
   const currentContentJson = parseDoc(current.content_json);
   const incomingEncryptedMarkdown =
-    input.contentMarkdown !== undefined && hasEncryptedNoteMarker(input.contentMarkdown);
+    input.contentMarkdown !== undefined && parseEncryptedNoteEnvelope(input.contentMarkdown) !== null;
   const rawContentJson = incomingEncryptedMarkdown
     ? emptyDoc()
     : input.contentJson !== undefined
@@ -1471,19 +1475,28 @@ export const updateMemoRecord = async (
       : input.contentMarkdown !== undefined
         ? markdownToDoc(input.contentMarkdown)
         : currentContentJson;
-  const contentMarkdown =
+  const rawContentMarkdown =
     input.contentMarkdown !== undefined
       ? input.contentMarkdown
       : input.contentJson !== undefined
         ? docToMarkdown(rawContentJson)
         : current.content_markdown;
   const currentEncrypted = hasEncryptedNoteMarker(current.content_markdown);
-  const nextEncrypted = hasEncryptedNoteMarker(contentMarkdown);
-  if (nextEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+  const nextEnvelope = parseEncryptedNoteEnvelope(rawContentMarkdown);
+  if (hasEncryptedNoteFencePrefix(rawContentMarkdown) && !nextEnvelope) {
     return {
       error: "invalid_encrypted_memo",
       message: "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
       status: 400,
+    };
+  }
+  const nextEncrypted = nextEnvelope !== null;
+  const contentMarkdown = nextEnvelope ? serializeEncryptedNoteEnvelope(nextEnvelope) : rawContentMarkdown;
+  if (currentEncrypted && !nextEncrypted && input.e2eeTransition !== "decrypt") {
+    return {
+      error: "encrypted_memo_decrypt_requires_intent",
+      message: "Decrypting an encrypted note requires explicit e2eeTransition: 'decrypt'.",
+      status: 409,
     };
   }
   const convertingToEncrypted = !currentEncrypted && nextEncrypted;
@@ -1538,6 +1551,7 @@ export const updateMemoRecord = async (
     isSuspiciousMemoOverwrite(current.title, current.content_text, title, contentText, {
       currentContentMarkdown: current.content_markdown,
       nextContentMarkdown: contentMarkdown,
+      e2eeTransition: input.e2eeTransition,
     })
   ) {
     return {

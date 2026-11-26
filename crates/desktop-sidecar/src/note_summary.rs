@@ -30,42 +30,186 @@ struct SummaryEdge {
     target: String,
 }
 
-pub(crate) fn has_encrypted_note_marker(markdown: &str) -> bool {
-    let bytes = markdown.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let ch = bytes[i];
-        if ch == b'`' || ch == b'~' {
-            let start = i;
-            while i < bytes.len() && bytes[i] == ch {
-                i += 1;
-            }
-            if i - start >= 3 {
-                let mut j = i;
-                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
-                    j += 1;
-                }
-                let token = b"edgeever-encrypted-note";
-                if j + token.len() <= bytes.len()
-                    && bytes[j..j + token.len()].eq_ignore_ascii_case(token)
-                {
-                    let after = &markdown[j + token.len()..];
-                    let valid_boundary = match after.chars().next() {
-                        None => true,
-                        Some(next) => {
-                            next.is_whitespace() || matches!(next, '`' | '~' | ':' | '-')
-                        }
-                    };
-                    if valid_boundary {
-                        return true;
-                    }
-                }
-            }
-        } else {
-            i += 1;
+fn decode_base64_strict_len(value: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let b64_val = |ch: u8| -> Option<u8> {
+        match ch {
+            b'A'..=b'Z' => Some(ch - b'A'),
+            b'a'..=b'z' => Some(ch - b'a' + 26),
+            b'0'..=b'9' => Some(ch - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut padding = 0usize;
+    if bytes[bytes.len() - 1] == b'=' {
+        padding += 1;
+        if bytes[bytes.len() - 2] == b'=' {
+            padding += 1;
         }
     }
-    false
+    let data_end = bytes.len() - padding;
+    for &b in &bytes[..data_end] {
+        b64_val(b)?;
+    }
+    // Reject non-canonical trailing padding bits.
+    if padding == 1 {
+        let last = b64_val(bytes[data_end - 1])?;
+        if (last & 0x03) != 0 {
+            return None;
+        }
+    } else if padding == 2 {
+        let last = b64_val(bytes[data_end - 1])?;
+        if (last & 0x0f) != 0 {
+            return None;
+        }
+    }
+    Some((bytes.len() / 4) * 3 - padding)
+}
+
+fn is_valid_e2ee_key_id(key_id: &str) -> bool {
+    let Some(rest) = key_id.strip_prefix("ek_") else {
+        return false;
+    };
+    (8..=80).contains(&rest.len())
+        && rest
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+pub(crate) fn has_encrypted_note_fence_prefix(markdown: &str) -> bool {
+    let trimmed = markdown.trim_start();
+    let bytes = trimmed.as_bytes();
+    if bytes.len() < 3 {
+        return false;
+    }
+    let ch = bytes[0];
+    if ch != b'`' && ch != b'~' {
+        return false;
+    }
+    let mut i = 0;
+    while i < bytes.len() && bytes[i] == ch {
+        i += 1;
+    }
+    if i < 3 {
+        return false;
+    }
+    while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    let token = b"edgeever-encrypted-note";
+    if i + token.len() > bytes.len() || !bytes[i..i + token.len()].eq_ignore_ascii_case(token) {
+        return false;
+    }
+    let after = &trimmed[i + token.len()..];
+    match after.chars().next() {
+        None => true,
+        Some(next) => next.is_whitespace() || matches!(next, '`' | '~' | ':' | '-'),
+    }
+}
+
+/// Cheap O(1) read-side structural check for stored/synced encrypted notes.
+/// Verifies only that the trimmed document begins with the exact opening fence
+/// followed by a newline, ends with a newline followed by the closing fence,
+/// and has non-empty content between them. Write boundaries must use
+/// `is_valid_encrypted_note_envelope`.
+pub(crate) fn has_encrypted_note_marker(markdown: &str) -> bool {
+    let trimmed = markdown.trim();
+    let Some(after_open) = trimmed.strip_prefix("```edgeever-encrypted-note") else {
+        return false;
+    };
+    let rest = if let Some(r) = after_open.strip_prefix("\r\n") {
+        r
+    } else if let Some(r) = after_open.strip_prefix('\n') {
+        r
+    } else if let Some(r) = after_open.strip_prefix('\r') {
+        r
+    } else {
+        return false;
+    };
+    let Some(before_close) = rest.strip_suffix("```") else {
+        return false;
+    };
+    let body = if let Some(b) = before_close.strip_suffix("\r\n") {
+        b
+    } else if let Some(b) = before_close.strip_suffix('\n') {
+        b
+    } else if let Some(b) = before_close.strip_suffix('\r') {
+        b
+    } else {
+        return false;
+    };
+    !body.is_empty()
+}
+
+pub(crate) fn is_valid_encrypted_note_envelope(markdown: &str) -> bool {
+    if !has_encrypted_note_marker(markdown) {
+        return false;
+    }
+    let normalized = markdown.replace("\r\n", "\n").replace('\r', "\n");
+    let trimmed = normalized.trim();
+    let Some(rest) = trimmed.strip_prefix("```edgeever-encrypted-note\n") else {
+        return false;
+    };
+    let Some(json_line) = rest.strip_suffix("\n```") else {
+        return false;
+    };
+    if json_line.is_empty() || json_line.contains('\n') || json_line.contains('`') {
+        return false;
+    }
+    let Ok(Value::Object(map)) = serde_json::from_str::<Value>(json_line) else {
+        return false;
+    };
+    if map.len() != 7 {
+        return false;
+    }
+    if map.get("v").and_then(Value::as_i64) != Some(1) {
+        return false;
+    }
+    if map.get("alg").and_then(Value::as_str) != Some("A256GCM") {
+        return false;
+    }
+    if !map
+        .get("keyId")
+        .and_then(Value::as_str)
+        .is_some_and(is_valid_e2ee_key_id)
+    {
+        return false;
+    }
+    if map
+        .get("wrappedDek")
+        .and_then(Value::as_str)
+        .and_then(decode_base64_strict_len)
+        != Some(48)
+    {
+        return false;
+    }
+    if map
+        .get("dekIv")
+        .and_then(Value::as_str)
+        .and_then(decode_base64_strict_len)
+        != Some(12)
+    {
+        return false;
+    }
+    if map
+        .get("iv")
+        .and_then(Value::as_str)
+        .and_then(decode_base64_strict_len)
+        != Some(12)
+    {
+        return false;
+    }
+    matches!(
+        map.get("ciphertext")
+            .and_then(Value::as_str)
+            .and_then(decode_base64_strict_len),
+        Some(16..=16_777_216)
+    )
 }
 
 pub(crate) fn note_list_metadata(markdown: &str) -> Value {
@@ -601,7 +745,10 @@ fn js_slice(value: &str, max_units: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::note_list_metadata;
+    use super::{
+        has_encrypted_note_fence_prefix, has_encrypted_note_marker,
+        is_valid_encrypted_note_envelope, note_list_metadata,
+    };
 
     const INFOGRAPHIC_FIXTURE: &str =
         "eyJzY2hlbWFWZXJzaW9uIjoxLCJzeW50YXgiOiJpbmZvZ3JhcGhpYyBjaGFydC1jb2x1bW4tc2ltcGxlIn0";
@@ -690,7 +837,7 @@ mod tests {
 
     #[test]
     fn encrypted_note_marker_is_recognized_and_clears_structured_flags() {
-        let encrypted = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\"}\n```";
+        let encrypted = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\",\"wrappedDek\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dekIv\":\"AAAAAAAAAAAAAAAA\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"AAAAAAAAAAAAAAAAAAAAAA==\"}\n```";
         let metadata = note_list_metadata(encrypted);
         assert_eq!(metadata["encrypted"], true);
         assert_eq!(metadata["diagramKind"], serde_json::Value::Null);
@@ -700,6 +847,26 @@ mod tests {
 
         let ordinary = note_list_metadata("plain note mentioning edgeever-encrypted-note");
         assert!(ordinary.get("encrypted").is_none());
+
+        // Plaintext note quoting an encrypted fence mid-body is NOT encrypted.
+        let prose_with_fence = format!("Intro text\n\n{encrypted}");
+        assert!(!has_encrypted_note_marker(&prose_with_fence));
+        assert!(!is_valid_encrypted_note_envelope(&prose_with_fence));
+        assert!(!has_encrypted_note_fence_prefix(&prose_with_fence));
+        assert!(note_list_metadata(&prose_with_fence).get("encrypted").is_none());
+
+        // Trailing plaintext after a valid fence is NOT an encrypted envelope.
+        let trailing_prose = format!("{encrypted}\n\nTrailing prose");
+        assert!(!has_encrypted_note_marker(&trailing_prose));
+        assert!(!is_valid_encrypted_note_envelope(&trailing_prose));
+        assert!(has_encrypted_note_fence_prefix(&trailing_prose));
+
+        // Fence-prefixed malformed block is caught by strict write-side validation.
+        let malformed = "```edgeever-encrypted-note\n{\"v\":1}\n```";
+        assert!(has_encrypted_note_fence_prefix(malformed));
+        assert!(has_encrypted_note_marker(malformed));
+        assert!(!is_valid_encrypted_note_envelope(malformed));
+        assert!(is_valid_encrypted_note_envelope(encrypted));
     }
 
     fn encode_json(json: &str) -> String {

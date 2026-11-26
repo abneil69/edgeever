@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 
 use crate::catalog::is_inbox_notebook;
 use crate::memo::{create_memo, empty_doc_json, memo_value};
-use crate::note_summary::has_encrypted_note_marker;
+use crate::note_summary::{
+    has_encrypted_note_fence_prefix, has_encrypted_note_marker, is_valid_encrypted_note_envelope,
+};
 use crate::{bool_param, enqueue_change, memo_remap_base_key, meta_value, set_meta, string_param};
 
 pub(crate) fn sync_status(database: &Connection) -> Result<Value, String> {
@@ -951,7 +953,10 @@ fn apply_one_sync_change(
         None
     };
     let content_markdown = string_param(memo, "contentMarkdown")?;
-    let encrypted = has_encrypted_note_marker(&content_markdown);
+    let encrypted = is_valid_encrypted_note_envelope(&content_markdown);
+    if has_encrypted_note_fence_prefix(&content_markdown) && !encrypted {
+        return Err("Encrypted note content must be a single valid edgeever-encrypted-note envelope.".to_owned());
+    }
     let content_json = if encrypted {
         empty_doc_json()
     } else {

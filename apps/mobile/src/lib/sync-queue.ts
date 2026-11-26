@@ -8,6 +8,7 @@ import {
   getNextSyncQueueRetryDelay,
   getSyncRetryAt,
   hasEncryptedNoteMarker,
+  isValidEncryptedNoteEnvelope,
   isMemoSyncBaseCurrent,
   summarizeSyncQueue,
   type MemoDetail,
@@ -27,6 +28,7 @@ export type MobileMemoUpdateSyncPayload = {
   contentMarkdown: string;
   notebookId: string;
   tags: string[];
+  e2eeTransition?: "decrypt";
 };
 
 export type MobileMemoCreateSyncPayload = {
@@ -117,13 +119,20 @@ export const queueMobileMemoUpdate = async (scope: string, payload: MobileMemoUp
         version: pendingCreate.version + 1,
       } : item);
     }
-    const existing = items.find((item) => item.id === id);
+    const existing = items.find((item): item is MobileMemoUpdateSyncQueueItem => item.id === id && item.kind === "memo.update");
+    const preserveDecryptIntent =
+      !payload.e2eeTransition
+      && existing?.payload.e2eeTransition === "decrypt"
+      && !hasEncryptedNoteMarker(payload.contentMarkdown);
+    const mergedPayload: MobileMemoUpdateSyncPayload = preserveDecryptIntent
+      ? { ...payload, e2eeTransition: "decrypt" }
+      : payload;
     const nextItem: MobileMemoUpdateSyncQueueItem = {
       id,
       kind: "memo.update",
-      memoId: payload.memoId,
+      memoId: mergedPayload.memoId,
       status: "pending",
-      payload,
+      payload: mergedPayload,
       attemptCount: existing?.attemptCount ?? 0,
       lastError: null,
       nextAttemptAt: null,
@@ -409,7 +418,7 @@ const syncMobileQueueItem = async (client: ReturnType<typeof createEdgeEverClien
     throw new ApiRequestError("Note changed before the offline draft could sync.", 409, "revision_conflict");
   }
 
-  const encrypted = hasEncryptedNoteMarker(item.payload.contentMarkdown);
+  const encrypted = isValidEncryptedNoteEnvelope(item.payload.contentMarkdown);
   const response = await client.updateMemo(item.memoId, {
     expectedRevision: item.payload.expectedRevision,
     expectedContentHash: item.payload.expectedContentHash,
@@ -419,6 +428,7 @@ const syncMobileQueueItem = async (client: ReturnType<typeof createEdgeEverClien
     contentMarkdown: item.payload.contentMarkdown,
     notebookId: item.payload.notebookId,
     tags: item.payload.tags,
+    ...(item.payload.e2eeTransition ? { e2eeTransition: item.payload.e2eeTransition } : {}),
   });
 
   return response.memo;

@@ -55,7 +55,7 @@ describe("sidebar body drafts (#652 PR B)", () => {
     expect(editor).toContain("documentFingerprint: sourceEditor.sliceText(0, sourceEditor.getDocumentLength()),");
     expect(sidebar).toContain("documentHash: hashAiDraftSource(pin.documentFingerprint),");
     expect(editor).toContain("hashAiDraftSource(getAiDocumentFingerprint(currentEditor.state.doc.toJSON())) === snapshot.documentHash");
-    expect(editor).toContain("aiDraftEditor={aiDraftEditor}");
+    expect(editor).toContain("aiDraftEditor={isEncryptedNote ? null : aiDraftEditor}");
   });
 
   test("signing out cancels drafts being generated and removes this account's drafts (#652 PR B review)", () => {

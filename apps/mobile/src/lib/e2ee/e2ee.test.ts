@@ -196,6 +196,49 @@ describe("Mobile E2EE crypto provider, session manager, biometric store, and sec
     expect(manager.getSnapshot().unlocked).toBe(false);
   });
 
+  test("MobileE2eeSessionManager waits for in-flight encryptMemo during concurrent lock without corrupting ciphertext", async () => {
+    const storage = createMemoryAsyncStorage();
+    const delayedProvider = {
+      randomBytes: (len: number) =>
+        new Promise<Uint8Array>((resolve) => {
+          setTimeout(() => resolve(webCryptoE2eeProvider.randomBytes(len) as Uint8Array), 15);
+        }),
+      pbkdf2Sha256: (...args: Parameters<typeof webCryptoE2eeProvider.pbkdf2Sha256>) =>
+        webCryptoE2eeProvider.pbkdf2Sha256(...args),
+      aesGcmEncrypt: (...args: Parameters<typeof webCryptoE2eeProvider.aesGcmEncrypt>) =>
+        webCryptoE2eeProvider.aesGcmEncrypt(...args),
+      aesGcmDecrypt: (...args: Parameters<typeof webCryptoE2eeProvider.aesGcmDecrypt>) =>
+        webCryptoE2eeProvider.aesGcmDecrypt(...args),
+    };
+    const manager = new MobileE2eeSessionManager({ storage, provider: delayedProvider });
+    await manager.setScope("https://example.com|mobile-race");
+    await manager.initializePassphrase("mobile-race-passphrase", async (payload) => ({
+      configured: true,
+      keyring: {
+        ...payload,
+        revision: 1,
+        createdAt: "2026-11-26T00:00:00.000Z",
+        updatedAt: "2026-11-26T00:00:00.000Z",
+      },
+    }));
+
+    const first = await manager.encryptMemo("m-race", "Mobile v1");
+    const cachedDekRef = first.noteKey.dek;
+    const pendingEncrypt = manager.encryptMemo("m-race", "Mobile v2 during background lock");
+    const pendingDecrypt = manager.decryptMemo("m-race", first.markdown);
+    const pendingLock = manager.lock("logout");
+
+    expect(manager.getSnapshot().unlocked).toBe(false);
+    const [second, decFirst] = await Promise.all([pendingEncrypt, pendingDecrypt]);
+    await pendingLock;
+    expect(decFirst.plaintextMarkdown).toBe("Mobile v1");
+    expect(cachedDekRef.every((byte) => byte === 0)).toBe(true);
+
+    await manager.unlockWithPassphrase("mobile-race-passphrase");
+    const verified = await manager.decryptMemo("m-race", second.markdown);
+    expect(verified.plaintextMarkdown).toBe("Mobile v2 during background lock");
+  });
+
   test("MobileE2eeBiometricStore enforces requireAuthentication and purges mismatched keyId", async () => {
     const secureData = new Map<string, string>();
     const secureCalls: Array<{ op: string; key: string; options?: any }> = [];

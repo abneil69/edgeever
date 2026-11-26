@@ -631,6 +631,17 @@ export const EditorPane = (props: EditorPaneProps) => {
     setEncryptConfirmOpen(true);
   }, [encrypted, props.demoMode, props.memo, props.repository, readOnly, t]);
 
+  // The server has already accepted the conversion at this point, so a failed
+  // local cache update must not be reported as a failed encrypt/decrypt.
+  const notifyConvertedMemoSaved = useCallback(async (savedMemo: MemoDetail): Promise<string | null> => {
+    try {
+      await propsOnSaved(savedMemo);
+      return null;
+    } catch (error) {
+      return error instanceof Error ? error.message : String(error);
+    }
+  }, [propsOnSaved]);
+
   const handleConfirmEncryptNote = useCallback(async () => {
     const target = props.memo;
     const snapshot = pendingEncryptSnapshot;
@@ -664,9 +675,12 @@ export const EditorPane = (props: EditorPaneProps) => {
       };
       decryptedStateRef.current = nextDecrypted;
       setDecryptedState(nextDecrypted);
-      await props.onSaved(saved.memo);
+      const cacheError = await notifyConvertedMemoSaved(saved.memo);
       setEncryptConfirmOpen(false);
       setPendingEncryptSnapshot(null);
+      if (cacheError) {
+        setE2eeNotice({ title: t("e2ee.encryptNoteAction"), description: cacheError });
+      }
     } catch (error) {
       setEncryptConfirmOpen(false);
       setPendingEncryptSnapshot(null);
@@ -678,7 +692,7 @@ export const EditorPane = (props: EditorPaneProps) => {
       e2eeConvertingRef.current = false;
       setE2eeConverting(false);
     }
-  }, [pendingEncryptSnapshot, props, queryClient, t]);
+  }, [notifyConvertedMemoSaved, pendingEncryptSnapshot, props, queryClient, t]);
 
   const handleConfirmDecryptNote = useCallback(async () => {
     const target = props.memo;
@@ -699,12 +713,15 @@ export const EditorPane = (props: EditorPaneProps) => {
         tags: snapshot.tags,
         e2eeTransition: "decrypt",
       });
-      await props.onSaved(saved.memo);
+      const cacheError = await notifyConvertedMemoSaved(saved.memo);
       e2eeSession.evictMemoDek(baseCipher.id);
       rawCipherMemoRef.current = null;
       decryptedStateRef.current = null;
       setDecryptedState(null);
       setDecryptConfirmSnapshot(null);
+      if (cacheError) {
+        setE2eeNotice({ title: t("e2ee.decryptNoteAction"), description: cacheError });
+      }
     } catch (error) {
       setDecryptConfirmSnapshot(null);
       setE2eeNotice({
@@ -715,7 +732,7 @@ export const EditorPane = (props: EditorPaneProps) => {
       e2eeConvertingRef.current = false;
       setE2eeConverting(false);
     }
-  }, [decryptConfirmSnapshot, props, t]);
+  }, [decryptConfirmSnapshot, notifyConvertedMemoSaved, props, t]);
 
   const { editingActive, requestEdit } = useStandaloneMobileEditor({
     memoId: encrypted ? null : (props.memo?.id ?? null),

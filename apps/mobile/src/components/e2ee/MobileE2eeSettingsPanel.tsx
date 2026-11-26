@@ -201,6 +201,8 @@ export const MobileE2eeSettingsPanel = ({ active }: { active: boolean }) => {
             </View>
           </View>
 
+          <Text style={styles.help}>{copy.changePassphraseNoWmkRotationNote}</Text>
+
           {biometricStatus.available ? (
             <View style={styles.biometricRow}>
               <Fingerprint color="#047857" size={20} />

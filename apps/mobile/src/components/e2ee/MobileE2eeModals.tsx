@@ -384,6 +384,9 @@ export const MobileE2eeChangePassphraseModal = ({
           </View>
           <ScrollView contentContainerStyle={styles.body} keyboardShouldPersistTaps="handled">
             <Text style={styles.description}>{copy.changePassphraseDescription}</Text>
+            <View style={styles.warningBox}>
+              <Text style={styles.warningText}>{copy.changePassphraseNoWmkRotationNote}</Text>
+            </View>
             <View style={styles.field}>
               <Text style={styles.label}>{copy.currentPassphraseLabel}</Text>
               <TextInput

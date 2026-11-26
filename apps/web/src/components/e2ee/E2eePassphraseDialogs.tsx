@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { AppConfirmDialog } from "@/components/dialogs/ConfirmDialogs";
 import { api, ApiRequestError } from "@/lib/api";
 import { e2eeSession, useE2eeSession } from "@/lib/e2ee";
 
@@ -330,6 +331,10 @@ export const E2eeChangePassphraseDialog = ({
           <DialogDescription>{t("e2ee.changePassphraseDescription")}</DialogDescription>
         </DialogHeader>
         <form onSubmit={(event) => void handleSubmit(event)} className="grid gap-4">
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{t("e2ee.changePassphraseNoWmkRotationNote")}</span>
+          </div>
           <label className="grid gap-1.5 text-xs font-medium text-slate-700">
             {t("e2ee.currentPassphraseLabel")}
             <Input
@@ -374,5 +379,25 @@ export const E2eeChangePassphraseDialog = ({
         </form>
       </DialogContent>
     </Dialog>
+  );
+};
+
+export const EncryptedPlaintextExportConfirmDialog = ({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) => {
+  const { t } = useTranslation();
+  return (
+    <AppConfirmDialog
+      title={t("e2ee.exportPlaintextConfirmTitle")}
+      description={t("e2ee.exportPlaintextConfirmDescription")}
+      confirmLabel={t("e2ee.exportPlaintextConfirmButton")}
+      tone="danger"
+      onCancel={onCancel}
+      onConfirm={onConfirm}
+    />
   );
 };

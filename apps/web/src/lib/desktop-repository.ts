@@ -7,7 +7,7 @@ import type {
   DesktopRpcParams,
   DesktopRpcResponses,
 } from "@edgeever/shared";
-import { docToMarkdown, docToText, emptyDoc, hasEncryptedNoteMarker, markdownToDoc, type MemoDetail } from "@edgeever/shared";
+import { docToMarkdown, docToText, emptyDoc, isValidEncryptedNoteEnvelope, markdownToDoc, type MemoDetail } from "@edgeever/shared";
 import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
 import type { EdgeEverRepository } from "@/lib/repository";
 import { api, getConfiguredDesktopApiBaseUrl } from "@/lib/api";
@@ -319,7 +319,7 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
   createMemo: (input) => {
     // The sidecar fallback wraps raw lines as paragraphs; parse Markdown here
     // with the same schema used by the editor before persisting a new note.
-    const encrypted = hasEncryptedNoteMarker(input.contentMarkdown);
+    const encrypted = isValidEncryptedNoteEnvelope(input.contentMarkdown);
     const contentJson = encrypted ? emptyDoc() : (input.contentJson ?? markdownToDoc(input.contentMarkdown ?? ""));
     const rpcParams: DesktopMemoCreateParams = {
       ...input,
@@ -358,7 +358,7 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
         typeof repairedInput.contentMarkdown === "string" ? repairedInput.contentMarkdown : input.contentMarkdown,
         toApiResourceUrl,
       );
-    const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
+    const isEncrypted = isValidEncryptedNoteEnvelope(contentMarkdown);
     const safeContentJson = isEncrypted ? emptyDoc() : portableContentJson;
     const rpcParams: DesktopMemoUpdateParams & { contentText: string } = {
       memoId: memo.id,
@@ -369,6 +369,7 @@ export const createDesktopRepository = (): EdgeEverRepository => ({
       contentMarkdown,
       contentText: isEncrypted ? "" : docToText(safeContentJson),
       tags: input.tags,
+      ...(input.e2eeTransition ? { e2eeTransition: input.e2eeTransition } : {}),
     };
     let result;
     if (options?.guardLocalSnapshot) {

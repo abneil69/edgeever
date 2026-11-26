@@ -15,7 +15,7 @@ export const publicTreeSql = `WITH RECURSIVE tree(id, workspace_id, share_id) AS
   JOIN tree t ON m.notebook_id = t.id AND m.workspace_id = t.workspace_id
   JOIN memo_contents mc ON mc.memo_id = m.id
   WHERE m.is_deleted = 0
-    AND instr(mc.content_markdown, '\`\`\`edgeever-encrypted-note') = 0
+    AND substr(mc.content_markdown, 1, 27) <> '\`\`\`edgeever-encrypted-note' || char(10)
     AND NOT EXISTS (
       SELECT 1 FROM notebook_share_excluded_memos e WHERE e.share_id = t.share_id AND e.memo_id = m.id
     )

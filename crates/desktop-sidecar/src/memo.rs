@@ -1,7 +1,10 @@
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::note_summary::{has_encrypted_note_marker, note_list_metadata};
+use crate::note_summary::{
+    has_encrypted_note_fence_prefix, has_encrypted_note_marker, is_valid_encrypted_note_envelope,
+    note_list_metadata,
+};
 use crate::sync::resolve_active_notebook_id;
 use crate::{
     bool_param, content_hash, enqueue_change, markdown_doc, memo_remap_base_key, now_id,
@@ -561,7 +564,13 @@ pub(crate) fn create_memo(database: &Connection, params: &Value) -> Result<Value
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let encrypted = has_encrypted_note_marker(&markdown);
+    let encrypted = is_valid_encrypted_note_envelope(&markdown);
+    if has_encrypted_note_fence_prefix(&markdown) && !encrypted {
+        return Err(
+            "invalid_encrypted_memo: Encrypted note content must be a single valid edgeever-encrypted-note envelope."
+                .to_owned(),
+        );
+    }
     let tags = params.get("tags").cloned().unwrap_or_else(|| json!([]));
     let content_json = if encrypted {
         empty_doc_json()
@@ -645,7 +654,14 @@ pub(crate) fn update_memo(database: &Connection, params: &Value) -> Result<Value
         .or_else(|| previous.get("contentMarkdown").and_then(Value::as_str))
         .unwrap_or("")
         .to_owned();
-    let is_encrypted = has_encrypted_note_marker(&markdown);
+    let is_encrypted = is_valid_encrypted_note_envelope(&markdown);
+    if has_encrypted_note_fence_prefix(&markdown) && !is_encrypted {
+        return Err(
+            "invalid_encrypted_memo: Encrypted note content must be a single valid edgeever-encrypted-note envelope."
+                .to_owned(),
+        );
+    }
+    let e2ee_transition = params.get("e2eeTransition").and_then(Value::as_str);
     let content_json = if is_encrypted {
         empty_doc_json()
     } else {
@@ -723,6 +739,12 @@ pub(crate) fn update_memo(database: &Connection, params: &Value) -> Result<Value
             "ENCRYPTED_NOTE_FORBIDDEN: Encrypted notes cannot be modified by plugins.".to_owned(),
         );
     }
+    if was_encrypted && !is_encrypted && e2ee_transition != Some("decrypt") {
+        return Err(
+            "encrypted_memo_decrypt_requires_intent: Decrypting an encrypted note requires explicit e2eeTransition: 'decrypt'."
+                .to_owned(),
+        );
+    }
     if !was_encrypted && is_encrypted {
         let active_resources: i64 = tx
             .query_row(
@@ -748,12 +770,17 @@ pub(crate) fn update_memo(database: &Connection, params: &Value) -> Result<Value
     // look newer than the cloud and produces a false revision conflict once
     // the coalesced outbox item is synced.
     tx.execute("UPDATE memo_contents SET content_json = ?2, content_markdown = ?3, content_text = ?4, content_hash = ?5, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE memo_id = ?1", rusqlite::params![memo_id, content_json_text, markdown, text, hash]).map_err(|e| e.to_string())?;
-    let payload = json!({
+    let mut payload = json!({
         "memoId": memo_id, "expectedRevision": expected_revision,
         "expectedContentHash": expected_content_hash,
         "title": params.get("title").and_then(Value::as_str).unwrap_or(""),
         "contentJson": content_json, "contentMarkdown": markdown, "tags": tags
     });
+    if e2ee_transition == Some("decrypt") && !is_encrypted {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("e2eeTransition".to_owned(), json!("decrypt"));
+        }
+    }
     // Plugin edits commit the memo, history and outbox together. Ordinary editor
     // writes retain their established behavior.
     if guarded.is_some() {
@@ -867,13 +894,26 @@ pub(crate) fn restore_memo_revision(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_owned();
-    let is_encrypted = has_encrypted_note_marker(&markdown);
+    let is_encrypted = is_valid_encrypted_note_envelope(&markdown);
+    if has_encrypted_note_fence_prefix(&markdown) && !is_encrypted {
+        return Err(
+            "invalid_encrypted_memo: Encrypted note content must be a single valid edgeever-encrypted-note envelope."
+                .to_owned(),
+        );
+    }
+    let e2ee_transition = params.get("e2eeTransition").and_then(Value::as_str);
     let was_encrypted = has_encrypted_note_marker(
         current
             .get("contentMarkdown")
             .and_then(Value::as_str)
             .unwrap_or(""),
     );
+    if was_encrypted && !is_encrypted && e2ee_transition != Some("decrypt") {
+        return Err(
+            "encrypted_memo_decrypt_requires_intent: Restoring a plaintext revision onto an encrypted note requires explicit e2eeTransition: 'decrypt'."
+                .to_owned(),
+        );
+    }
     let content_json = if is_encrypted {
         empty_doc_json()
     } else {
@@ -915,7 +955,7 @@ pub(crate) fn restore_memo_revision(
             return Err("Notes with images or attachments cannot be encrypted yet.".to_owned());
         }
         tx.execute(
-            "DELETE FROM memo_revisions WHERE memo_id = ?1 AND instr(content_markdown, '```edgeever-encrypted-note') = 0",
+            "DELETE FROM memo_revisions WHERE memo_id = ?1 AND substr(content_markdown, 1, 27) <> '```edgeever-encrypted-note' || char(10)",
             [&memo_id],
         )
         .map_err(|e| e.to_string())?;
@@ -925,15 +965,16 @@ pub(crate) fn restore_memo_revision(
     tx.execute("UPDATE memos SET title = ?2, excerpt = ?3, tags_json = ?4, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), updated_by = 'desktop' WHERE id = ?1", rusqlite::params![memo_id, if title.is_empty() { None } else { Some(title.clone()) }, excerpt, tags.to_string()]).map_err(|e| e.to_string())?;
     tx.execute("UPDATE memo_contents SET content_json = ?2, content_markdown = ?3, content_text = ?4, content_hash = ?5, revision = ?6, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE memo_id = ?1", rusqlite::params![memo_id, content_json_text, markdown, text, hash, next_revision]).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    enqueue_change(
-        database,
-        "memo.update",
-        &memo_id,
-        &json!({
-            "memoId": memo_id, "expectedRevision": current.get("revision").and_then(Value::as_i64).unwrap_or(0),
-            "expectedContentHash": current.get("contentHash").and_then(Value::as_str).unwrap_or(""),
-            "title": title, "contentJson": content_json, "contentMarkdown": markdown, "tags": tags,
-        }),
-    )?;
+    let mut outbox_payload = json!({
+        "memoId": memo_id, "expectedRevision": current.get("revision").and_then(Value::as_i64).unwrap_or(0),
+        "expectedContentHash": current.get("contentHash").and_then(Value::as_str).unwrap_or(""),
+        "title": title, "contentJson": content_json, "contentMarkdown": markdown, "tags": tags,
+    });
+    if was_encrypted && !is_encrypted && e2ee_transition == Some("decrypt") {
+        if let Some(obj) = outbox_payload.as_object_mut() {
+            obj.insert("e2eeTransition".to_owned(), json!("decrypt"));
+        }
+    }
+    enqueue_change(database, "memo.update", &memo_id, &outbox_payload)?;
     memo_value(database, &memo_id, true).map(|memo| json!({ "memo": memo }))
 }

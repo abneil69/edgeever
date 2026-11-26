@@ -1191,6 +1191,27 @@ export const MemoDetailModal = ({
     }
   }, [clearImageExportTimeout, failImageExport, resolvedLocale]);
 
+  const confirmEncryptedPlaintextCopy = useCallback(
+    () => new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (value: boolean) => {
+        if (settled) return;
+        settled = true;
+        resolve(value);
+      };
+      Alert.alert(
+        e2eeCopy.exportPlaintextConfirmTitle,
+        e2eeCopy.exportPlaintextConfirmDescription,
+        [
+          { text: getMobileCatalog(resolvedLocale).common.cancel, style: "cancel", onPress: () => finish(false) },
+          { text: e2eeCopy.exportPlaintextConfirmButton, style: "destructive", onPress: () => finish(true) },
+        ],
+        { cancelable: true, onDismiss: () => finish(false) },
+      );
+    }),
+    [e2eeCopy.exportPlaintextConfirmButton, e2eeCopy.exportPlaintextConfirmDescription, e2eeCopy.exportPlaintextConfirmTitle, resolvedLocale],
+  );
+
   const exportMemoImage = useCallback((
     format: "jpeg" | "png",
     options: {
@@ -1689,6 +1710,7 @@ export const MemoDetailModal = ({
                 content={viewerContent}
                 dom={noteBodyDom}
                 encryptedNote={isEncryptedNote}
+                onConfirmEncryptedCopy={isEncryptedNote ? confirmEncryptedPlaintextCopy : undefined}
                 locale={resolvedLocale}
                 mode={isEditing ? "editor" : "viewer"}
                 onAiCancel={isEditing && !isEncryptedNote ? editor.cancelSelectionAi : undefined}
@@ -1697,7 +1719,7 @@ export const MemoDetailModal = ({
                 onImagePreview={isEditing || isEncryptedNote ? undefined : onImagePreview}
                 onDoublePress={isEditing || locksRichTextEdit ? undefined : async () => {
                   beginEditorStartup();
-                  onRichEdit(effectiveMemo, "body");
+                  onRichEdit(memo ?? effectiveMemo, "body");
                 }}
                 onImageExportEvent={isEncryptedNote ? undefined : handleImageExportEvent}
                 onLoadResource={isEditing ? editor.loadEditorResource : loadViewerResource}
@@ -1740,7 +1762,7 @@ export const MemoDetailModal = ({
             accessibilityRole="button"
             onPress={() => {
               beginEditorStartup();
-              onRichEdit(effectiveMemo, "body");
+              onRichEdit(memo ?? effectiveMemo, "body");
             }}
             style={[styles.detailEditFab, { bottom: editFabBottom }]}
           >

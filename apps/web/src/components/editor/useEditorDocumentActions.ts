@@ -17,6 +17,12 @@ import { dispatchMemoDocumentAction, resolveEditorExportContent } from "./editor
 import { isEditorReady } from "./editor-pane-helpers";
 
 export type WechatCopyState = "idle" | "copying" | "copied" | "error";
+export type PlaintextExportAction =
+  | "export-markdown"
+  | "export-html"
+  | "export-pdf"
+  | "share-image"
+  | "copy-wechat";
 
 export const useEditorDocumentActions = ({
   canShareMemo,
@@ -25,6 +31,7 @@ export const useEditorDocumentActions = ({
   effectiveReadOnly,
   getMobilePlainTextValue,
   hydratedEditorMemoId,
+  isEncryptedNote = false,
   markdownSource,
   memo,
   noteProse,
@@ -42,6 +49,7 @@ export const useEditorDocumentActions = ({
   effectiveReadOnly: boolean;
   getMobilePlainTextValue: () => string;
   hydratedEditorMemoId: string | null;
+  isEncryptedNote?: boolean;
   markdownSource: string;
   memo: MemoDetail | null;
   noteProse: ResolvedNoteProse;
@@ -58,10 +66,15 @@ export const useEditorDocumentActions = ({
   const [shareOpen, setShareOpen] = useState(false);
   const [imageShareOpen, setImageShareOpen] = useState(false);
   const [imageShareSource, setImageShareSource] = useState<ShareNoteImageSource | null>(null);
+  const [pendingPlaintextExport, setPendingPlaintextExport] = useState<PlaintextExportAction | null>(null);
   const [wechatCopyState, setWechatCopyState] = useState<WechatCopyState>("idle");
   const [wechatCopyError, setWechatCopyError] = useState<string | null>(null);
   const wechatCopyPendingRef = useRef(false);
   const wechatCopyResetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    setPendingPlaintextExport(null);
+  }, [memo?.id, isEncryptedNote]);
 
   useEffect(() => () => {
     if (wechatCopyResetTimerRef.current !== null) {
@@ -80,7 +93,7 @@ export const useEditorDocumentActions = ({
     [editor, getMobilePlainTextValue, markdownSource, useMarkdownSourceEditor, useMobilePlainTextEditor],
   );
 
-  const handleCopyToWeChat = useCallback(async () => {
+  const performCopyToWeChat = useCallback(async () => {
     if (!isEditorReady(editor) || wechatCopyPendingRef.current) {
       return;
     }
@@ -109,7 +122,7 @@ export const useEditorDocumentActions = ({
     }
   }, [editor, markdownSource, useMarkdownSourceEditor]);
 
-  const handleExportPdf = useCallback((preopenedWindow?: Window | null) => {
+  const performExportPdf = useCallback((preopenedWindow?: Window | null) => {
     const content = resolveExportContent();
     if (!isEditorReady(editor) || !content || !memo) {
       return;
@@ -146,7 +159,7 @@ export const useEditorDocumentActions = ({
     }
   }, [editor, i18n.language, i18n.resolvedLanguage, memo, mermaidTheme, noteProse, notebookName, resolveExportContent, t, tagsText, title]);
 
-  const handleExportMarkdown = useCallback(() => {
+  const performExportMarkdown = useCallback(() => {
     const content = resolveExportContent();
     if (!content || !memo) {
       return;
@@ -155,7 +168,7 @@ export const useEditorDocumentActions = ({
     downloadMarkdownFile(buildSingleNoteMarkdown(content.markdown, title, parseTagsText(tagsText)), title, t("common.untitledMemo"));
   }, [memo, notebookName, resolveExportContent, t, tagsText, title]);
 
-  const handleExportHtml = useCallback(async () => {
+  const performExportHtml = useCallback(async () => {
     const content = resolveExportContent();
     if (!isEditorReady(editor) || !content || !memo) {
       return;
@@ -206,13 +219,81 @@ export const useEditorDocumentActions = ({
     };
   }, [editor, i18n.language, i18n.resolvedLanguage, memo, notebookName, resolveExportContent, t, tagsText, title]);
 
-  const handleOpenImageShare = useCallback(() => {
+  const performOpenImageShare = useCallback(() => {
     const options = buildImageExportOptions("png");
     if (!options) return;
     const { format: _format, ...source } = options;
     setImageShareSource(source);
     setImageShareOpen(true);
   }, [buildImageExportOptions]);
+
+  const handleCopyToWeChat = useCallback(async () => {
+    if (isEncryptedNote) {
+      setPendingPlaintextExport("copy-wechat");
+      return;
+    }
+    await performCopyToWeChat();
+  }, [isEncryptedNote, performCopyToWeChat]);
+
+  const handleExportPdf = useCallback((preopenedWindow?: Window | null) => {
+    if (isEncryptedNote) {
+      try { preopenedWindow?.close(); } catch { /* ignore */ }
+      setPendingPlaintextExport("export-pdf");
+      return;
+    }
+    performExportPdf(preopenedWindow);
+  }, [isEncryptedNote, performExportPdf]);
+
+  const handleExportMarkdown = useCallback(() => {
+    if (isEncryptedNote) {
+      setPendingPlaintextExport("export-markdown");
+      return;
+    }
+    performExportMarkdown();
+  }, [isEncryptedNote, performExportMarkdown]);
+
+  const handleExportHtml = useCallback(async () => {
+    if (isEncryptedNote) {
+      setPendingPlaintextExport("export-html");
+      return;
+    }
+    await performExportHtml();
+  }, [isEncryptedNote, performExportHtml]);
+
+  const handleOpenImageShare = useCallback(() => {
+    if (isEncryptedNote) {
+      setPendingPlaintextExport("share-image");
+      return;
+    }
+    performOpenImageShare();
+  }, [isEncryptedNote, performOpenImageShare]);
+
+  const cancelPendingPlaintextExport = useCallback(() => {
+    setPendingPlaintextExport(null);
+  }, []);
+
+  const confirmPendingPlaintextExport = useCallback(() => {
+    const action = pendingPlaintextExport;
+    setPendingPlaintextExport(null);
+    if (!action) return;
+    switch (action) {
+      case "export-markdown":
+        performExportMarkdown();
+        break;
+      case "export-html":
+        void performExportHtml();
+        break;
+      case "export-pdf":
+        performExportPdf();
+        break;
+      case "share-image":
+        performOpenImageShare();
+        break;
+      case "copy-wechat":
+        void performCopyToWeChat();
+        break;
+    }
+  }, [pendingPlaintextExport, performCopyToWeChat, performExportHtml, performExportMarkdown, performExportPdf, performOpenImageShare]);
 
   const handleSaveAsTemplate = useCallback(() => {
     if (!memo || effectiveReadOnly) {
@@ -281,6 +362,8 @@ export const useEditorDocumentActions = ({
   ]);
 
   return {
+    cancelPendingPlaintextExport,
+    confirmPendingPlaintextExport,
     handleCopyToWeChat,
     handleExportHtml,
     handleExportMarkdown,
@@ -289,6 +372,7 @@ export const useEditorDocumentActions = ({
     handleSaveAsTemplate,
     imageShareOpen,
     imageShareSource,
+    pendingPlaintextExport,
     setImageShareOpen,
     setShareOpen,
     shareOpen,

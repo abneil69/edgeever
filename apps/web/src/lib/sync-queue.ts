@@ -3,6 +3,7 @@ import {
   createEmptySyncRunResult,
   getMemoSyncBaseConflictDetails,
   getSyncRetryAt,
+  hasEncryptedNoteMarker,
   isMemoSyncBaseCurrent,
   summarizeSyncQueue,
   type MemoDetail,
@@ -90,13 +91,20 @@ export const putMemoUpdateQueueItem = async (payload: MemoUpdateSyncPayload, sco
   // A previous in-flight save may already have advanced this queue row to a
   // newer acknowledged server base. A local autosave that started just
   // before that acknowledgement must not move the successor back again.
-  const nextPayload = existingPayload && existingPayload.expectedRevision > payload.expectedRevision
+  const preserveDecryptIntent =
+    !payload.e2eeTransition
+    && existingPayload?.e2eeTransition === "decrypt"
+    && !hasEncryptedNoteMarker(payload.contentMarkdown);
+  const payloadWithIntent: MemoUpdateSyncPayload = preserveDecryptIntent
+    ? { ...payload, e2eeTransition: "decrypt" }
+    : payload;
+  const nextPayload = existingPayload && existingPayload.expectedRevision > payloadWithIntent.expectedRevision
     ? {
-        ...payload,
+        ...payloadWithIntent,
         expectedRevision: existingPayload.expectedRevision,
         expectedContentHash: existingPayload.expectedContentHash,
       }
-    : payload;
+    : payloadWithIntent;
 
   await localDb.syncQueue.put({
     id,
@@ -853,6 +861,7 @@ const syncQueueItem = async (item: SyncQueueItem): Promise<SyncQueueResult> => {
     contentJson: payload.contentJson as TiptapDoc,
     contentMarkdown: payload.contentMarkdown,
     tags: payload.tags,
+    ...(payload.e2eeTransition ? { e2eeTransition: payload.e2eeTransition } : {}),
   });
 
   return data.memo;

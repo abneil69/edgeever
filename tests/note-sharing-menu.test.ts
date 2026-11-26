@@ -15,9 +15,9 @@ describe("note sharing menu", () => {
   test("keeps sharing available while reading is locked and on the phone", () => {
     expect(editorActionsSource).toContain("if (canShareMemo) setShareOpen(true)");
     expect(editorActionsSource).not.toContain("if (!effectiveReadOnly) setShareOpen(true)");
-    expect(editorSource).toContain("canShareMemo: Boolean(memo && !readOnly)");
-    expect(editorSource).toContain("{!readOnly && (\n                  <DropdownMenuItem");
-    expect(editorSource).toContain('{!readOnly && editorColumnWidth >= 960 && (!mobileEditingActive || isMemoShared) && (');
+    expect(editorSource).toContain("canShareMemo: Boolean(memo && !readOnly && !isEncryptedNote)");
+    expect(editorSource).toContain("{!readOnly && !isEncryptedNote && (\n                  <DropdownMenuItem");
+    expect(editorSource).toContain('{!readOnly && !isEncryptedNote && editorColumnWidth >= 960 && (!mobileEditingActive || isMemoShared) && (');
     expect(editorSource).toContain("isMemoShared ? <Globe");
     expect(editorSource).toContain("aria-pressed={isMemoShared}");
     expect(editorSource).toContain('aria-label={t(isLocalMemoId(memo.id) ? "sharing.afterSync" : isMemoShared ? "sharing.manage" : "sharing.action")}');

@@ -4,6 +4,7 @@ import { useTranslation } from "react-i18next";
 import { Check, CircleAlert, Code2, Copy, Maximize2 } from "lucide-react";
 import { MERMAID_THEME_PALETTES, useMermaidTheme } from "./ThemeProvider";
 import { MermaidViewer } from "./MermaidViewer";
+import { EncryptedPlaintextExportConfirmDialog } from "./e2ee/E2eePassphraseDialogs";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { isAppleShortcutPlatform } from "@/lib/app-helpers";
 import { copyTextToClipboard } from "@/lib/clipboard";
@@ -22,6 +23,7 @@ export const MermaidCodeBlock = ({ editor, node }: NodeViewProps) => {
   const [renderState, setRenderState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [copyState, setCopyState] = useState<"idle" | "copied" | "error">("idle");
   const [copyTooltipOpen, setCopyTooltipOpen] = useState(false);
+  const [confirmEncryptedCopyOpen, setConfirmEncryptedCopyOpen] = useState(false);
   const copyLabel = t(copyState === "copied" ? "editorToolbar.codeCopied" : copyState === "error" ? "editorToolbar.codeCopyFailed" : "editorToolbar.copyCode");
   const previewRef = useRef<HTMLDivElement>(null);
 
@@ -58,9 +60,17 @@ export const MermaidCodeBlock = ({ editor, node }: NodeViewProps) => {
     return () => window.clearTimeout(timer);
   }, [copyState]);
 
-  const handleCopy = async () => {
+  const performCopy = async () => {
     const copied = await copyTextToClipboard(node.textContent);
     setCopyState(copied ? "copied" : "error");
+  };
+
+  const handleCopy = async () => {
+    if (editor?.view?.dom?.getAttribute("data-encrypted-note") === "true") {
+      setConfirmEncryptedCopyOpen(true);
+      return;
+    }
+    await performCopy();
   };
 
   useEffect(() => {
@@ -257,6 +267,15 @@ export const MermaidCodeBlock = ({ editor, node }: NodeViewProps) => {
           zoomInLabel={t("editorToolbar.mermaidZoomIn")}
           zoomOutLabel={t("editorToolbar.mermaidZoomOut")}
           onClose={() => setViewerOpen(false)}
+        />
+      )}
+      {confirmEncryptedCopyOpen && (
+        <EncryptedPlaintextExportConfirmDialog
+          onCancel={() => setConfirmEncryptedCopyOpen(false)}
+          onConfirm={() => {
+            setConfirmEncryptedCopyOpen(false);
+            void performCopy();
+          }}
         />
       )}
     </NodeViewWrapper>

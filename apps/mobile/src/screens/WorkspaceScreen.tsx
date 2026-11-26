@@ -1017,6 +1017,7 @@ export const WorkspaceScreen = ({
         contentMarkdown: optimisticMemo.contentMarkdown,
         notebookId: optimisticMemo.notebookId,
         tags: optimisticMemo.tags,
+        ...(payload.e2eeTransition ? { e2eeTransition: payload.e2eeTransition } : {}),
       };
 
       // Online-first: push immediately when the instance is reachable so common
@@ -1234,6 +1235,7 @@ export const WorkspaceScreen = ({
                 payload: {
                   contentJson: markdownToDoc(plaintextMarkdown),
                   contentMarkdown: plaintextMarkdown,
+                  e2eeTransition: "decrypt",
                 },
               });
               mobileE2eeSession.evictMemoDek(memo.id);

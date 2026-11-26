@@ -663,7 +663,7 @@ export const MemoListPane = ({
     }
 
     const { memo } = memoContextMenu;
-    const printWindow = action === "export-pdf" ? preopenNotePrintWindow() : undefined;
+    const printWindow = action === "export-pdf" && !memo.encrypted ? preopenNotePrintWindow() : undefined;
     setMemoContextMenu(null);
     onRequestDocumentAction(memo.id, action, printWindow);
   };
@@ -1722,13 +1722,15 @@ export const MemoListPane = ({
                     <ImageIcon className="h-4 w-4 text-slate-500" />
                     {t("editor.imageShare.action")}
                   </DropdownMenuItem>
-                  <DropdownMenuItem
-                    className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
-                    onClick={() => requestContextDocumentAction("save-as-template")}
-                  >
-                    <Pencil className="h-4 w-4 text-slate-500" />
-                    {t("templates.saveAsTemplate")}
-                  </DropdownMenuItem>
+                  {!memoContextMenu.memo.encrypted && (
+                    <DropdownMenuItem
+                      className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
+                      onClick={() => requestContextDocumentAction("save-as-template")}
+                    >
+                      <Pencil className="h-4 w-4 text-slate-500" />
+                      {t("templates.saveAsTemplate")}
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator className="my-1 h-px bg-slate-100" />
                   <DropdownMenuItem
                     className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-rose-700 hover:bg-rose-50 cursor-pointer outline-none"

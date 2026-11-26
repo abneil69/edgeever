@@ -6,7 +6,7 @@ import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, ListTree } f
 import { useTranslation } from "react-i18next";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { buildOutlineTree, type OutlineItem, type OutlineTreeItem } from "@/lib/editor-outline";
-import { mapCollapsedOutlinePositions, readOutlineSnapshot, restoreOutlinePositions, writeOutlineSnapshot, type OutlineSnapshot } from "@/lib/editor-outline-state";
+import { mapCollapsedOutlinePositions, readOutlineSnapshot, removeOutlineSnapshot, restoreOutlinePositions, writeOutlineSnapshot, type OutlineSnapshot } from "@/lib/editor-outline-state";
 import { cn } from "@/lib/utils";
 import { EDITOR_OUTLINE_WIDTH } from "@/lib/workspace-ui";
 
@@ -19,6 +19,7 @@ type EditorOutlineProps = {
   // portals here so it stays put while the note scrolls.
   collapsedAnchor: HTMLElement | null;
   collapsed: boolean;
+  persist?: boolean;
   shortcutLabel: string;
   onCollapsedChange: (collapsed: boolean) => void;
   contentRef?: Ref<HTMLElement>;
@@ -54,7 +55,7 @@ const sameOutlineItems = (left: OutlineItem[], right: OutlineItem[]) =>
     return other?.level === item.level && other.pos === item.pos && other.text === item.text;
   });
 
-export const EditorOutline = ({ editor, memoId, editingMemoIdRef, scrollContainer, collapsedAnchor, collapsed, shortcutLabel, onCollapsedChange, contentRef }: EditorOutlineProps) => {
+export const EditorOutline = ({ editor, memoId, editingMemoIdRef, scrollContainer, collapsedAnchor, collapsed, persist = true, shortcutLabel, onCollapsedChange, contentRef }: EditorOutlineProps) => {
   const { t } = useTranslation();
   const [items, setItems] = useState<OutlineItem[]>([]);
   const [activePos, setActivePos] = useState<number | null>(null);
@@ -65,17 +66,23 @@ export const EditorOutline = ({ editor, memoId, editingMemoIdRef, scrollContaine
   const snapshotRef = useRef<OutlineSnapshot>({ items: [], collapsed: [] });
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const save = useCallback(() => {
+    if (!persist) return;
     if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
     saveTimerRef.current = setTimeout(() => {
       writeOutlineSnapshot(memoId, snapshotRef.current);
       saveTimerRef.current = null;
     }, 250);
-  }, [memoId]);
+  }, [memoId, persist]);
 
   useEffect(() => {
     if (!editor || editor.isDestroyed || editingMemoIdRef.current !== memoId) return;
     const initialItems = getOutlineItems(editor);
-    const initialCollapsed = restoreOutlinePositions(readOutlineSnapshot(memoId), initialItems);
+    if (!persist) {
+      removeOutlineSnapshot(memoId);
+    }
+    const initialCollapsed = persist
+      ? restoreOutlinePositions(readOutlineSnapshot(memoId), initialItems)
+      : new Set<number>();
     snapshotRef.current = { items: initialItems, collapsed: [...initialCollapsed] };
     setItems(initialItems.filter((item) => item.text));
     setCollapsedPositions(initialCollapsed);
@@ -103,7 +110,9 @@ export const EditorOutline = ({ editor, memoId, editingMemoIdRef, scrollContaine
     const flush = () => {
       if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
       saveTimerRef.current = null;
-      writeOutlineSnapshot(memoId, snapshotRef.current);
+      if (persist) {
+        writeOutlineSnapshot(memoId, snapshotRef.current);
+      }
     };
     editor.on("transaction", refresh);
     window.addEventListener("pagehide", flush);
@@ -112,12 +121,14 @@ export const EditorOutline = ({ editor, memoId, editingMemoIdRef, scrollContaine
       window.removeEventListener("pagehide", flush);
       flush();
     };
-  }, [editor, memoId, editingMemoIdRef, save]);
+  }, [editor, memoId, editingMemoIdRef, persist, save]);
 
   const changeCollapsedPositions = (next: Set<number>) => {
     snapshotRef.current = { ...snapshotRef.current, collapsed: [...next] };
     setCollapsedPositions(next);
-    writeOutlineSnapshot(memoId, snapshotRef.current);
+    if (persist) {
+      writeOutlineSnapshot(memoId, snapshotRef.current);
+    }
   };
 
   const updateActiveItem = useCallback(() => {

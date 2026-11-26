@@ -91,6 +91,7 @@ export type DesktopMemoUpdateParams = {
   contentJson: TiptapDoc;
   contentMarkdown?: string;
   tags: string[];
+  e2eeTransition?: "decrypt";
 };
 
 export type DesktopRpcResponses = {

@@ -36,6 +36,7 @@ export type MemoUpdateSyncPayload = {
   contentJson: TiptapDoc;
   contentMarkdown?: string;
   tags: string[];
+  e2eeTransition?: "decrypt";
 };
 
 export type MemoCreateSyncPayload = {

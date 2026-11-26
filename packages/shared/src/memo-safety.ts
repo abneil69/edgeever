@@ -1,4 +1,4 @@
-import { hasEncryptedNoteMarker, parseEncryptedNoteEnvelope } from "./e2ee";
+import { hasEncryptedNoteFencePrefix, hasEncryptedNoteMarker, isValidEncryptedNoteEnvelope } from "./e2ee";
 
 export const isSuspiciousMemoOverwrite = (
   currentTitle: string | null,
@@ -8,16 +8,19 @@ export const isSuspiciousMemoOverwrite = (
   options?: {
     currentContentMarkdown?: string | null;
     nextContentMarkdown?: string | null;
+    e2eeTransition?: "decrypt";
   },
 ) => {
   const currentEncrypted = hasEncryptedNoteMarker(options?.currentContentMarkdown);
-  const nextHasEncryptedMarker = hasEncryptedNoteMarker(options?.nextContentMarkdown);
-  const nextValidEncrypted = nextHasEncryptedMarker
-    ? parseEncryptedNoteEnvelope(options?.nextContentMarkdown) !== null
-    : false;
+  const nextValidEncrypted = isValidEncryptedNoteEnvelope(options?.nextContentMarkdown);
+  const nextHasEncryptedFencePrefix = hasEncryptedNoteFencePrefix(options?.nextContentMarkdown);
 
-  // Allow valid plaintext <-> encrypted transitions and valid encrypted envelope updates.
-  if (nextValidEncrypted || (currentEncrypted && !nextHasEncryptedMarker)) {
+  // Allow valid plaintext -> encrypted transitions, encrypted envelope updates,
+  // and explicit encrypted -> plaintext decryptions.
+  if (
+    nextValidEncrypted
+    || (currentEncrypted && !nextHasEncryptedFencePrefix && options?.e2eeTransition === "decrypt")
+  ) {
     return false;
   }
 

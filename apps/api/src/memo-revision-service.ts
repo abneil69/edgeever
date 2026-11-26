@@ -4,8 +4,10 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
   parseEncryptedNoteEnvelope,
+  serializeEncryptedNoteEnvelope,
   type MemoDetail,
   type MemoRevision,
   type TiptapDoc,
@@ -190,6 +192,7 @@ export const restoreMemoRevision = async (
   actor: AuditActor,
   actorLabel: string,
   dependencies: Pick<MemoRevisionDependencies, "getMemoDetail" | "getMemoDetailRow">,
+  options?: { e2eeTransition?: "decrypt" },
 ) => {
   const current = await dependencies.getMemoDetailRow(db, workspaceId, memoId);
   if (!current) throw new AppError("not_found", "Memo not found", 404);
@@ -199,16 +202,25 @@ export const restoreMemoRevision = async (
 
   const tags = parseJsonArray(revision.tags_json);
   const parsedJson = parseDoc(revision.content_json);
-  const contentMarkdown = revision.content_markdown || docToMarkdown(parsedJson);
-  const isEncryptedRevision = hasEncryptedNoteMarker(contentMarkdown);
-  if (isEncryptedRevision && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+  const rawContentMarkdown = revision.content_markdown || docToMarkdown(parsedJson);
+  const parsedEnvelope = parseEncryptedNoteEnvelope(rawContentMarkdown);
+  if (hasEncryptedNoteFencePrefix(rawContentMarkdown) && !parsedEnvelope) {
     throw new AppError(
       "invalid_encrypted_memo",
       "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
       400,
     );
   }
+  const isEncryptedRevision = parsedEnvelope !== null;
+  const contentMarkdown = parsedEnvelope ? serializeEncryptedNoteEnvelope(parsedEnvelope) : rawContentMarkdown;
   const currentEncrypted = hasEncryptedNoteMarker(current.content_markdown);
+  if (currentEncrypted && !isEncryptedRevision && options?.e2eeTransition !== "decrypt") {
+    throw new AppError(
+      "encrypted_memo_decrypt_requires_intent",
+      "Restoring a plaintext revision onto an encrypted note requires explicit e2eeTransition: 'decrypt'.",
+      409,
+    );
+  }
   const now = isoNow();
   if (isEncryptedRevision && !currentEncrypted) {
     const existingResource = await db
@@ -244,7 +256,7 @@ export const restoreMemoRevision = async (
     ? [
         db.prepare(
           `DELETE FROM memo_revisions
-           WHERE memo_id = ? AND instr(content_markdown, '\`\`\`edgeever-encrypted-note') = 0`,
+           WHERE memo_id = ? AND substr(content_markdown, 1, 27) <> '\`\`\`edgeever-encrypted-note' || char(10)`,
         ).bind(memoId),
         db.prepare(
           `DELETE FROM memo_share_slug_claims

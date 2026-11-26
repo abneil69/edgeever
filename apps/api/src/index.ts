@@ -406,7 +406,8 @@ registerMemoRoutes(app, {
   mergeMemos: (...args) => mergeMemosRecord(...args),
   moveMemos: (...args) => moveMemosRecord(...args),
   restoreMemo: (...args) => restoreMemoRecord(...args),
-  restoreMemoRevision: (...args) => restoreMemoRevisionService(...args, { getMemoDetail, getMemoDetailRow }),
+  restoreMemoRevision: (db, workspaceId, memoId, revisionId, actor, actorLabel, options) =>
+    restoreMemoRevisionService(db, workspaceId, memoId, revisionId, actor, actorLabel, { getMemoDetail, getMemoDetailRow }, options),
   updateMemo: (...args) => updateMemoRecord(...args),
 });
 

@@ -72,6 +72,7 @@ export const MemoUpdateSchema = z.object({
   createdAt: z.string().datetime().optional(),
   updatedAt: z.string().datetime().optional(),
   allowDestructiveOverwrite: z.boolean().optional(),
+  e2eeTransition: z.enum(["decrypt"]).optional(),
 });
 
 export const TemplateCreateSchema = z.object({

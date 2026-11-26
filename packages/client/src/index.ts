@@ -1406,10 +1406,10 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
 
     listMemoRevisions: (memoId: string) => request<ListMemoRevisionsResponse>(`/api/v1/memos/${encodeURIComponent(memoId)}/revisions`),
 
-    restoreMemoRevision: (memoId: string, revisionId: string) =>
+    restoreMemoRevision: (memoId: string, revisionId: string, payload?: { e2eeTransition?: "decrypt" }) =>
       request<MemoResponse>(`/api/v1/memos/${encodeURIComponent(memoId)}/revisions/${encodeURIComponent(revisionId)}/restore`, {
         method: "POST",
-        body: JSON.stringify({}),
+        body: JSON.stringify(payload ?? {}),
       }),
 
     listResources: () => request<ListResourcesResponse>("/api/v1/resources"),
@@ -1575,6 +1575,7 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
         createdAt?: string;
         updatedAt?: string;
         allowDestructiveOverwrite?: boolean;
+        e2eeTransition?: "decrypt";
       }
     ) =>
       request<MemoResponse>(`/api/v1/memos/${encodeURIComponent(memoId)}`, {

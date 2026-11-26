@@ -43,6 +43,21 @@ fn enqueue_change(
                         merged_object.insert(key.to_owned(), value.clone());
                     }
                 }
+                let next_is_encrypted = crate::note_summary::is_valid_encrypted_note_envelope(
+                    merged_object
+                        .get("contentMarkdown")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                );
+                if !merged_object.contains_key("e2eeTransition")
+                    && previous_object
+                        .get("e2eeTransition")
+                        .and_then(Value::as_str)
+                        == Some("decrypt")
+                    && !next_is_encrypted
+                {
+                    merged_object.insert("e2eeTransition".to_owned(), json!("decrypt"));
+                }
             }
             database
                 .execute(
@@ -958,6 +973,18 @@ mod tests {
             }] }),
         )
         .unwrap();
+        assert_eq!(
+            database
+                .query_row(
+                    "SELECT is_deleted FROM notebooks WHERE id = 'ws_default_inbox'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            1
+        );
+    }
+
     #[test]
     fn encrypted_notes_are_isolated_in_sidecar_storage_search_and_merge() {
         let database = Connection::open_in_memory().unwrap();
@@ -1042,7 +1069,7 @@ mod tests {
             )
             .unwrap();
 
-        let envelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_sidecar_test\",\"wrappedDek\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dekIv\":\"AAAAAAAAAAAAAAAA\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"CIPHER_SECRET_TOKEN_XYZ\"}\n```";
+        let envelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_sidecar_test\",\"wrappedDek\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dekIv\":\"AAAAAAAAAAAAAAAA\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"Q0lQSEVSU0VDUkVUVE9LRU5YWVo=\"}\n```";
 
         let created = crate::memo::create_memo(
             &database,
@@ -1063,12 +1090,70 @@ mod tests {
             json!({"type": "doc", "content": [{"type": "paragraph"}]})
         );
 
-        let by_cipher = crate::memo::list_memos(&database, &json!({ "q": "CIPHER_SECRET_TOKEN_XYZ" })).unwrap();
+        let by_cipher = crate::memo::list_memos(&database, &json!({ "q": "Q0lQSEVSU0VDUkVUVE9LRU5YWVo" })).unwrap();
         assert_eq!(by_cipher["memos"].as_array().unwrap().len(), 0);
         let by_title = crate::memo::list_memos(&database, &json!({ "q": "Secret Vault" })).unwrap();
         assert_eq!(by_title["memos"].as_array().unwrap().len(), 1);
         assert_eq!(by_title["memos"][0]["encrypted"], true);
         assert_eq!(by_title["memos"][0]["excerpt"], "");
+
+        // Decrypting an encrypted note without explicit e2eeTransition is rejected.
+        let silent_decrypt_err = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": encrypted_id,
+                "title": "Secret Vault",
+                "contentMarkdown": "Unintentional plaintext overwrite",
+                "tags": ["vault"]
+            }),
+        )
+        .unwrap_err();
+        assert!(silent_decrypt_err.contains("encrypted_memo_decrypt_requires_intent"));
+
+        // Explicit e2eeTransition: "decrypt" succeeds and is preserved when a subsequent plaintext edit coalesces in the outbox.
+        let decrypted = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": encrypted_id,
+                "title": "Secret Vault",
+                "contentMarkdown": "Intentional plaintext body",
+                "tags": ["vault"],
+                "e2eeTransition": "decrypt"
+            }),
+        )
+        .unwrap();
+        assert_eq!(decrypted["contentMarkdown"], "Intentional plaintext body");
+        let _edited_after_decrypt = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": encrypted_id,
+                "title": "Secret Vault",
+                "contentMarkdown": "Intentional plaintext body v2",
+                "tags": ["vault"]
+            }),
+        )
+        .unwrap();
+        let coalesced_payload: String = database
+            .query_row(
+                "SELECT payload_json FROM _edgeever_sidecar_outbox WHERE kind = 'memo.update' AND entity_id = ?1",
+                [&encrypted_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let coalesced_json: Value = serde_json::from_str(&coalesced_payload).unwrap();
+        assert_eq!(coalesced_json["e2eeTransition"], "decrypt");
+
+        // Re-encrypt for subsequent merge/resource tests.
+        let _reencrypted = crate::memo::update_memo(
+            &database,
+            &json!({
+                "memoId": encrypted_id,
+                "title": "Secret Vault",
+                "contentMarkdown": envelope,
+                "tags": ["vault"]
+            }),
+        )
+        .unwrap();
 
         let plain = crate::memo::create_memo(
             &database,

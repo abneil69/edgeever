@@ -94,6 +94,10 @@ export class E2eeSessionManager {
   private masterKey: Uint8Array | null = null;
   private masterKeyId: string | null = null;
   private readonly noteDekCache = new Map<string, CachedDekEntry>();
+  private keyGeneration = 0;
+  private inFlightCryptoOps = 0;
+  private readonly inFlightWaiters: Array<() => void> = [];
+  private readonly pendingZeroizeBuffers: Uint8Array[] = [];
   private lastActivityAt = 0;
   private lastTouchAt = 0;
 
@@ -198,14 +202,52 @@ export class E2eeSessionManager {
     }
   }
 
+  private flushPendingZeroize() {
+    while (this.pendingZeroizeBuffers.length > 0) {
+      zeroizeBytes(this.pendingZeroizeBuffers.pop());
+    }
+  }
+
+  private waitForInFlightCryptoOps(): Promise<void> {
+    if (this.inFlightCryptoOps === 0) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      this.inFlightWaiters.push(resolve);
+    });
+  }
+
+  private async runCryptoOp<T>(fn: () => Promise<T>): Promise<T> {
+    this.inFlightCryptoOps += 1;
+    try {
+      return await fn();
+    } finally {
+      this.inFlightCryptoOps -= 1;
+      if (this.inFlightCryptoOps === 0) {
+        this.flushPendingZeroize();
+        const waiters = this.inFlightWaiters.splice(0);
+        for (const resolve of waiters) {
+          resolve();
+        }
+      }
+    }
+  }
+
   private zeroizeAllKeys() {
-    zeroizeBytes(this.masterKey);
+    this.keyGeneration += 1;
+    const buffers: Uint8Array[] = [];
+    if (this.masterKey) buffers.push(this.masterKey);
     this.masterKey = null;
     this.masterKeyId = null;
     for (const entry of this.noteDekCache.values()) {
-      zeroizeBytes(entry.dek);
+      buffers.push(entry.dek);
     }
     this.noteDekCache.clear();
+    if (this.inFlightCryptoOps === 0) {
+      for (const buffer of buffers) {
+        zeroizeBytes(buffer);
+      }
+    } else {
+      this.pendingZeroizeBuffers.push(...buffers);
+    }
   }
 
   setScope = (nextScope: string) => {
@@ -371,10 +413,9 @@ export class E2eeSessionManager {
   };
 
   private cacheDek(memoId: string, binding: NoteDekBinding) {
-    const existing = this.noteDekCache.get(memoId);
-    if (existing && existing.dek !== binding.dek) {
-      zeroizeBytes(existing.dek);
-    }
+    // Do not zeroize the replaced DEK buffer in place: a concurrent crypto call
+    // may still hold a reference to it before copying. It will be scrubbed when
+    // detached/locked or garbage collected once no references remain.
     this.noteDekCache.set(memoId, {
       keyId: binding.keyId,
       dek: binding.dek,
@@ -386,27 +427,40 @@ export class E2eeSessionManager {
   evictMemoDek = (memoId: string) => {
     const existing = this.noteDekCache.get(memoId);
     if (existing) {
-      zeroizeBytes(existing.dek);
       this.noteDekCache.delete(memoId);
+      if (this.inFlightCryptoOps === 0) {
+        zeroizeBytes(existing.dek);
+      } else {
+        this.pendingZeroizeBuffers.push(existing.dek);
+      }
     }
   };
 
   decryptMemo = async (memoId: string, envelopeOrMarkdown: string | EncryptedNoteEnvelope) => {
-    if (!this.masterKey || !this.masterKeyId) {
+    const masterKey = this.masterKey;
+    const masterKeyId = this.masterKeyId;
+    if (!masterKey || !masterKeyId) {
       throw new Error("Encrypted notes are locked.");
     }
+    const generation = this.keyGeneration;
     this.touchActivity();
-    const result = await decryptNoteContent(
-      {
-        memoId,
-        masterKey: this.masterKey,
-        envelopeOrMarkdown,
-        expectedKeyId: this.masterKeyId,
-      },
-      this.provider,
-    );
-    this.cacheDek(memoId, result.noteKey);
-    return result;
+    return this.runCryptoOp(async () => {
+      const result = await decryptNoteContent(
+        {
+          memoId,
+          masterKey,
+          envelopeOrMarkdown,
+          expectedKeyId: masterKeyId,
+        },
+        this.provider,
+      );
+      if (this.keyGeneration === generation && this.masterKey && this.masterKeyId === result.noteKey.keyId) {
+        this.cacheDek(memoId, result.noteKey);
+      } else {
+        zeroizeBytes(result.dek);
+      }
+      return result;
+    });
   };
 
   encryptMemo = async (
@@ -414,32 +468,41 @@ export class E2eeSessionManager {
     plaintextMarkdown: string,
     existingMarkdown?: string | null,
   ) => {
-    if (!this.masterKey || !this.masterKeyId) {
+    const masterKey = this.masterKey;
+    const masterKeyId = this.masterKeyId;
+    if (!masterKey || !masterKeyId) {
       throw new Error("Encrypted notes are locked.");
     }
+    const generation = this.keyGeneration;
     this.touchActivity();
     const cached = this.noteDekCache.get(memoId);
-    const matchingCached = cached && cached.keyId === this.masterKeyId ? cached : undefined;
+    const matchingCached = cached && cached.keyId === masterKeyId ? cached : undefined;
     const existingEnvelope = matchingCached
       ? undefined
       : (existingMarkdown ? parseEncryptedNoteEnvelope(existingMarkdown) ?? undefined : undefined);
 
-    const result = await encryptNoteContent(
-      {
-        memoId,
-        keyId: this.masterKeyId,
-        masterKey: this.masterKey,
-        plaintextMarkdown,
-        ...(matchingCached
-          ? { noteKey: matchingCached }
-          : existingEnvelope && existingEnvelope.keyId === this.masterKeyId
-            ? { existingEnvelope }
-            : {}),
-      },
-      this.provider,
-    );
-    this.cacheDek(memoId, result.noteKey);
-    return result;
+    return this.runCryptoOp(async () => {
+      const result = await encryptNoteContent(
+        {
+          memoId,
+          keyId: masterKeyId,
+          masterKey,
+          plaintextMarkdown,
+          ...(matchingCached
+            ? { noteKey: matchingCached }
+            : existingEnvelope && existingEnvelope.keyId === masterKeyId
+              ? { existingEnvelope }
+              : {}),
+        },
+        this.provider,
+      );
+      if (this.keyGeneration === generation && this.masterKey && this.masterKeyId === result.noteKey.keyId) {
+        this.cacheDek(memoId, result.noteKey);
+      } else {
+        zeroizeBytes(result.dek);
+      }
+      return result;
+    });
   };
 
   touchActivity = (force = false) => {
@@ -484,6 +547,7 @@ export class E2eeSessionManager {
       this.zeroizeAllKeys();
       this.lastLockReason = reason;
       this.emit();
+      await this.waitForInFlightCryptoOps();
     })().finally(() => {
       this.lockPromise = null;
     });
