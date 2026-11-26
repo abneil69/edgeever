@@ -11,7 +11,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { api } from "@/lib/api";
+import { api, ApiRequestError } from "@/lib/api";
 import { e2eeSession, useE2eeSession } from "@/lib/e2ee";
 
 const MIN_PASSPHRASE_LENGTH = 8;
@@ -63,6 +63,9 @@ export const E2eeSetupDialog = ({
       onOpenChange(false);
       onConfigured?.();
     } catch (err) {
+      if (err instanceof ApiRequestError && err.code === "keyring_already_exists") {
+        void e2eeSession.refreshKeyring(api.getE2eeKeyring).catch(() => undefined);
+      }
       setError(err instanceof Error ? err.message : t("e2ee.wrongPassphrase"));
     } finally {
       setSubmitting(false);
@@ -304,8 +307,13 @@ export const E2eeChangePassphraseDialog = ({
       await e2eeSession.rotatePassphrase(currentPassphrase, newPassphrase, api.putE2eeKeyring);
       onOpenChange(false);
       onChanged?.();
-    } catch {
-      setError(t("e2ee.wrongPassphrase"));
+    } catch (err) {
+      if (err instanceof ApiRequestError && err.code === "keyring_revision_conflict") {
+        void e2eeSession.refreshKeyring(api.getE2eeKeyring).catch(() => undefined);
+        setError(err.message);
+      } else {
+        setError(t("e2ee.wrongPassphrase"));
+      }
     } finally {
       setSubmitting(false);
     }

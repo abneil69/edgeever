@@ -183,7 +183,7 @@ export const restoreJsonE2eeKeyring = async (
       )
       .run();
 
-    if (Number(inserted.meta.changes) === 1) {
+    if (Number(inserted.meta.changes) > 0) {
       await audit(db, "user", null, "backup.restore_e2ee_keyring", "workspace", workspaceId, {
         keyId: keyring.keyId,
         revision: keyring.revision,
@@ -232,7 +232,7 @@ export const restoreJsonE2eeKeyring = async (
       )
       .run();
 
-    if (Number(updated.meta.changes) === 1) {
+    if (Number(updated.meta.changes) > 0) {
       await audit(db, "user", null, "backup.restore_e2ee_keyring", "workspace", workspaceId, {
         keyId: keyring.keyId,
         revision: keyring.revision,

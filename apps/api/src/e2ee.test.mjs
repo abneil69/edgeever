@@ -1345,4 +1345,111 @@ describe("E2EE revision restore plaintext cleanup & cross-instance ZIP backup/re
       .get().backup_revision;
     expect(revAfterDelete).toBe(revBeforeDelete + 1);
   });
+
+  test("handles D1-style meta.changes that include backup_revision trigger writes", async () => {
+    const fixture = setupFixture({ workspaceId: "ws_d1_trigger", notebookId: "nb_d1_trigger" });
+    const rawDb = fixture.env.storage.db;
+    const countTotalChanges = () => Number(fixture.sqlite.prepare("SELECT total_changes() AS n").get().n);
+    const wrapStatement = (stmt) => ({
+      bind: (...values) => wrapStatement(stmt.bind(...values)),
+      first: (...args) => stmt.first(...args),
+      all: (...args) => stmt.all(...args),
+      run: async () => {
+        const before = countTotalChanges();
+        const result = await stmt.run();
+        const after = countTotalChanges();
+        return {
+          ...result,
+          meta: {
+            ...result.meta,
+            changes: after - before,
+          },
+        };
+      },
+    });
+    const d1LikeDb = {
+      ...rawDb,
+      prepare: (sql) => wrapStatement(rawDb.prepare(sql)),
+    };
+    const d1Env = {
+      ...fixture.env,
+      storage: { ...fixture.env.storage, db: d1LikeDb },
+    };
+    const d1App = new Hono();
+    d1App.onError((error, c) => {
+      if (error instanceof AppError) return apiError(c, error.code, error.message, error.status);
+      throw error;
+    });
+    d1App.use("/api/v1/*", async (c, next) => {
+      c.set("auth", { ...USER_AUTH, workspaceId: "ws_d1_trigger" });
+      await next();
+    });
+    registerE2eeKeyringRoutes(d1App, { isDemoMode: () => false });
+
+    // 1. Initial keyring creation succeeds with 201 even when trigger makes meta.changes === 2.
+    const init = await initializeWorkspaceKeyring({ passphrase: "d1-trigger-passphrase-1" });
+    const createRes = await d1App.request(
+      "http://edgeever.test/api/v1/e2ee/keyring",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(init.keyring),
+      },
+      d1Env,
+    );
+    expect(createRes.status).toBe(201);
+    const createdBody = await createRes.json();
+    expect(createdBody.configured).toBe(true);
+    expect(createdBody.keyring.revision).toBe(1);
+
+    // 2. Duplicate creation without expectedRevision returns 409 (INSERT OR IGNORE -> 0 changes).
+    const duplicateRes = await d1App.request(
+      "http://edgeever.test/api/v1/e2ee/keyring",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(init.keyring),
+      },
+      d1Env,
+    );
+    expect(duplicateRes.status).toBe(409);
+    expect((await duplicateRes.json()).error.code).toBe("keyring_already_exists");
+
+    // 3. Passphrase rotation succeeds with 200 even when UPDATE trigger makes meta.changes === 2.
+    const rotated = await rotateWorkspacePassphrase({
+      currentPassphrase: "d1-trigger-passphrase-1",
+      newPassphrase: "d1-trigger-passphrase-2",
+      currentKeyring: createdBody.keyring,
+    });
+    const rotateRes = await d1App.request(
+      "http://edgeever.test/api/v1/e2ee/keyring",
+      {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(rotated.keyring),
+      },
+      d1Env,
+    );
+    expect(rotateRes.status).toBe(200);
+    const rotatedBody = await rotateRes.json();
+    expect(rotatedBody.keyring.revision).toBe(2);
+
+    const createAudits = fixture.sqlite
+      .prepare("SELECT action FROM audit_events WHERE entity_id = 'ws_d1_trigger' AND action LIKE 'e2ee.%' ORDER BY rowid")
+      .all()
+      .map((row) => row.action);
+    expect(createAudits).toEqual(["e2ee.keyring_create", "e2ee.keyring_rotate"]);
+
+    // 4. Backup restore insert and upgrade also record audit events under D1-style meta.changes === 2.
+    fixture.sqlite.prepare("DELETE FROM workspace_e2ee_keyrings WHERE workspace_id = 'ws_d1_trigger'").run();
+    const restoredV1 = await restoreJsonE2eeKeyring(d1LikeDb, "ws_d1_trigger", createdBody.keyring);
+    expect(restoredV1.revision).toBe(1);
+    const restoredV2 = await restoreJsonE2eeKeyring(d1LikeDb, "ws_d1_trigger", rotatedBody.keyring);
+    expect(restoredV2.revision).toBe(2);
+    const restoreAudits = fixture.sqlite
+      .prepare("SELECT metadata_json FROM audit_events WHERE entity_id = 'ws_d1_trigger' AND action = 'backup.restore_e2ee_keyring' ORDER BY rowid")
+      .all()
+      .map((row) => JSON.parse(row.metadata_json).mode);
+    expect(restoreAudits).toEqual(["insert", "upgrade"]);
+  });
 });

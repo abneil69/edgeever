@@ -73,6 +73,10 @@ export const MobileE2eeSetupModal = ({
       onClose();
       onConfigured?.();
     } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "keyring_already_exists") {
+        void mobileE2eeSession.refreshKeyring(() => client.getE2eeKeyring()).catch(() => undefined);
+      }
       setError(err instanceof Error ? err.message : copy.decryptFailed);
     } finally {
       setSubmitting(false);
@@ -355,6 +359,10 @@ export const MobileE2eeChangePassphraseModal = ({
       onClose();
       onRotated?.();
     } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "keyring_revision_conflict") {
+        void mobileE2eeSession.refreshKeyring(() => client.getE2eeKeyring()).catch(() => undefined);
+      }
       setError(err instanceof Error ? err.message : copy.wrongPassphrase);
     } finally {
       setSubmitting(false);

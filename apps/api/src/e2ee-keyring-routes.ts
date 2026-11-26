@@ -119,7 +119,10 @@ export const registerE2eeKeyringRoutes = (
           )
           .run();
 
-        if (Number(inserted.meta.changes) !== 1) {
+        // Cloudflare D1 meta.changes includes rows modified by AFTER INSERT triggers
+        // (such as trg_backup_workspace_e2ee_keyrings_insert), so a successful single-row
+        // insert reports >= 1 (typically 2), while an ignored PK conflict reports 0.
+        if (!(Number(inserted.meta.changes) > 0)) {
           return apiError(
             c,
             "keyring_already_exists",
@@ -182,7 +185,8 @@ export const registerE2eeKeyringRoutes = (
         )
         .run();
 
-      if (Number(updated.meta.changes) !== 1) {
+      // D1 meta.changes includes trg_backup_workspace_e2ee_keyrings_update writes (>= 1 on match, 0 on conflict).
+      if (!(Number(updated.meta.changes) > 0)) {
         const latest = await selectKeyringRow(db, workspaceId);
         if (latest && latest.key_id !== input.keyId) {
           return apiError(
