@@ -5,7 +5,7 @@ import { listMemoTemplateGallery } from "@edgeever/shared/memo-template-gallery"
 import { localizeDefaultMemoTemplate } from "@edgeever/shared/memo-template-seeds";
 import type { createEdgeEverClient } from "@edgeever/client";
 import { Modal, Pressable, ScrollView, View } from "react-native";
-import { ActivityIndicator, FileText, LayoutTemplate, X } from "./icons";
+import { ActivityIndicator, FileText, LayoutTemplate, LockKeyhole, X } from "./icons";
 import { Text } from "./LocalizedText";
 import {
   galleryEntryToMobileSelectableTemplate,
@@ -14,7 +14,7 @@ import {
   type MobileCreateMemoSeed,
   type MobileSelectableTemplate,
 } from "../lib/mobile-templates";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { getMobileCatalog, useMobileLocale } from "../lib/mobile-locale";
 import { styles } from "../screens/workspace-styles";
 
 type MobileClient = ReturnType<typeof createEdgeEverClient>;
@@ -168,6 +168,7 @@ export const MobileCreateChoiceModal = ({
   canCreate,
   onBlank,
   onClose,
+  onEncrypted,
   onTemplate,
   visible,
 }: {
@@ -175,10 +176,12 @@ export const MobileCreateChoiceModal = ({
   canCreate: boolean;
   onBlank: () => void;
   onClose: () => void;
+  onEncrypted?: () => void;
   onTemplate: () => void;
   visible: boolean;
 }) => {
-  const { translate } = useMobileLocale();
+  const { resolvedLocale, translate } = useMobileLocale();
+  const e2eeCopy = getMobileCatalog(resolvedLocale).e2ee;
   return (
     <Modal animationType="fade" onRequestClose={onClose} transparent visible={visible}>
       <Pressable onPress={onClose} style={[styles.actionSheetBackdrop, { paddingBottom: bottomOffset }]}>
@@ -211,6 +214,25 @@ export const MobileCreateChoiceModal = ({
                 <Text style={styles.templateChoiceDescription}>{translate("从空白页开始记录")}</Text>
               </View>
             </Pressable>
+            {onEncrypted ? (
+              <Pressable
+                accessibilityRole="button"
+                disabled={!canCreate}
+                onPress={() => {
+                  onClose();
+                  onEncrypted();
+                }}
+                style={[styles.templateChoiceRow, !canCreate && styles.templateChoiceRowDisabled]}
+              >
+                <View style={styles.templateChoiceIcon}>
+                  <LockKeyhole color="#b45309" size={18} />
+                </View>
+                <View style={styles.templateChoiceText}>
+                  <Text style={styles.templateChoiceTitle}>{e2eeCopy.newEncryptedNote}</Text>
+                  <Text style={styles.templateChoiceDescription}>{e2eeCopy.encryptedCardHint}</Text>
+                </View>
+              </Pressable>
+            ) : null}
             <Pressable
               accessibilityRole="button"
               disabled={!canCreate}

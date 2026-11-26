@@ -10,6 +10,7 @@ import { Pressable, Text, TextInput } from "../components/LocalizedText";
 import { resolveMobileThemeStyles, useMobileTheme, type MobileResolvedTheme } from "../lib/mobile-theme";
 import { useSession } from "../lib/session";
 import { TotpSettingsPanel } from "./TotpSettingsPanel";
+import { MobileE2eeSettingsPanel } from "../components/e2ee/MobileE2eeSettingsPanel";
 
 export const AccountSecurityPanel = ({
   active,
@@ -71,6 +72,8 @@ export const AccountSecurityPanel = ({
     </View>
     <View style={styles.divider} />
     <TotpSettingsPanel active={active} />
+    <View style={styles.divider} />
+    <MobileE2eeSettingsPanel active={active} />
     </View>
   );
 };

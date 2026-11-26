@@ -3,9 +3,11 @@ import { ApiRequestError, type createEdgeEverClient } from "@edgeever/client";
 import {
   createEmptySyncQueueSummary,
   createEmptySyncRunResult,
+  emptyDoc,
   formatLocalDraftClipboardText,
   getNextSyncQueueRetryDelay,
   getSyncRetryAt,
+  hasEncryptedNoteMarker,
   isMemoSyncBaseCurrent,
   summarizeSyncQueue,
   type MemoDetail,
@@ -274,6 +276,9 @@ export const getMobileConflictDraftClipboardText = async (scope: string, memoId:
   ]);
 
   if (queued && queued.kind === "memo.update") {
+    if (hasEncryptedNoteMarker(queued.payload.contentMarkdown)) {
+      return null;
+    }
     return formatLocalDraftClipboardText({
       title: queued.payload.title,
       tags: queued.payload.tags,
@@ -404,11 +409,13 @@ const syncMobileQueueItem = async (client: ReturnType<typeof createEdgeEverClien
     throw new ApiRequestError("Note changed before the offline draft could sync.", 409, "revision_conflict");
   }
 
+  const encrypted = hasEncryptedNoteMarker(item.payload.contentMarkdown);
   const response = await client.updateMemo(item.memoId, {
     expectedRevision: item.payload.expectedRevision,
     expectedContentHash: item.payload.expectedContentHash,
     editSessionId: editSession.id,
     title: item.payload.title,
+    ...(encrypted ? { contentJson: emptyDoc() } : {}),
     contentMarkdown: item.payload.contentMarkdown,
     notebookId: item.payload.notebookId,
     tags: item.payload.tags,

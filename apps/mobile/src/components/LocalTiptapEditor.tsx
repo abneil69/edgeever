@@ -157,6 +157,7 @@ type LocalTiptapEditorSharedProps = {
   theme: "light" | "dark";
   /** Live-switchable. The same DomWebView stays mounted across viewer → editor. */
   mode?: "editor" | "viewer";
+  encryptedNote?: boolean;
   aiPromptsJson?: string;
   autoFocus?: boolean;
   onChange?: (content: EditorDoc) => Promise<void>;
@@ -663,13 +664,15 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   const onResourcePressRef = useRef(props.onResourcePress);
   const onImagePreviewRef = useRef(props.mode === "viewer" ? props.onImagePreview : undefined);
   const onDoublePressRef = useRef(props.mode === "viewer" ? props.onDoublePress : undefined);
-  const onPickImageRef = useRef(props.mode === "viewer" ? undefined : props.onPickImage);
-  const onAiRequestRef = useRef(props.mode === "viewer" ? undefined : props.onAiRequest);
-  const onAiCancelRef = useRef(props.mode === "viewer" ? undefined : props.onAiCancel);
+  const encryptedNoteRef = useRef(Boolean(props.encryptedNote));
+  encryptedNoteRef.current = Boolean(props.encryptedNote);
+  const onPickImageRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onPickImage);
+  const onAiRequestRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiRequest);
+  const onAiCancelRef = useRef(props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiCancel);
   const onReadyRef = useRef(props.onReady ?? (async () => undefined));
   const onSearchResultRef = useRef(props.onSearchResult ?? ignoreSearchResult);
   const onReaderScrollRef = useRef(props.onReaderScroll);
-  const onImageExportEventRef = useRef(props.onImageExportEvent);
+  const onImageExportEventRef = useRef(props.encryptedNote ? undefined : props.onImageExportEvent);
   const searchStateRef = useRef({ activeIndex: -1, query: "" });
   const [aiPanel, setAiPanel] = useState<MobileAiPanelState | null>(null);
   const [aiSelectionTrigger, setAiSelectionTrigger] = useState<MobileAiSelectionTriggerPosition | null>(null);
@@ -720,13 +723,13 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   onResourcePressRef.current = props.onResourcePress;
   onImagePreviewRef.current = props.mode === "viewer" ? props.onImagePreview : undefined;
   onDoublePressRef.current = props.mode === "viewer" ? props.onDoublePress : undefined;
-  onPickImageRef.current = props.mode === "viewer" ? undefined : props.onPickImage;
-  onAiRequestRef.current = props.mode === "viewer" ? undefined : props.onAiRequest;
-  onAiCancelRef.current = props.mode === "viewer" ? undefined : props.onAiCancel;
+  onPickImageRef.current = props.mode === "viewer" || props.encryptedNote ? undefined : props.onPickImage;
+  onAiRequestRef.current = props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiRequest;
+  onAiCancelRef.current = props.mode === "viewer" || props.encryptedNote ? undefined : props.onAiCancel;
   onReadyRef.current = props.onReady ?? (async () => undefined);
   onSearchResultRef.current = props.onSearchResult ?? ignoreSearchResult;
   onReaderScrollRef.current = props.onReaderScroll;
-  onImageExportEventRef.current = props.onImageExportEvent;
+  onImageExportEventRef.current = props.encryptedNote ? undefined : props.onImageExportEvent;
   const protectedImageExtension = useMemo(
     () => createProtectedImageExtension(
       props.baseUrl,
@@ -752,6 +755,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       name: "edgeeverMobileNoteSearchHighlight",
       addProseMirrorPlugins() {
         return [createMobileNoteSearchHighlightPlugin({
+          disabled: () => encryptedNoteRef.current,
           getActiveIndex: () => searchStateRef.current.activeIndex,
           getQuery: () => searchStateRef.current.query,
         })];
@@ -871,6 +875,14 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   }, [editor, props.baseUrl, props.locale]);
 
   const search = useCallback((query: DOMValue, requestedIndex: DOMValue) => {
+    if (encryptedNoteRef.current) {
+      searchStateRef.current = { activeIndex: -1, query: "" };
+      if (editor && !editor.isDestroyed) {
+        editor.view.dispatch(editor.state.tr.setMeta(MOBILE_NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY, true));
+      }
+      void onSearchResultRef.current(0, 0, "");
+      return;
+    }
     const normalizedQuery = typeof query === "string" ? query : "";
     const matches = editor && !editor.isDestroyed
       ? getMobileNoteSearchMatches(editor.state.doc, normalizedQuery)
@@ -900,6 +912,10 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   }, [editor]);
 
   const replaceAll = useCallback((query: DOMValue, replacement: DOMValue) => {
+    if (encryptedNoteRef.current) {
+      void onSearchResultRef.current(0, 0, "");
+      return;
+    }
     const normalizedQuery = typeof query === "string" ? query : "";
     const normalizedReplacement = typeof replacement === "string" ? replacement : "";
     const matches = editor && !editor.isDestroyed
@@ -1261,7 +1277,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
   }, [aiUndoFingerprint, editor, props.baseUrl]);
 
   const exportImage = useCallback((requestJsonValue: DOMValue) => {
-    if (typeof requestJsonValue !== "string" || !editor || editor.isDestroyed || !onImageExportEventRef.current) return;
+    if (encryptedNoteRef.current || typeof requestJsonValue !== "string" || !editor || editor.isDestroyed || !onImageExportEventRef.current) return;
 
     let request: ImageExportRequest;
     try {
@@ -1746,7 +1762,7 @@ function LocalTiptapEditorImpl(props: LocalTiptapEditorProps) {
       <style>{getEditorStyles(props.theme, { viewer: isViewer })}</style>
       {!isViewer ? (
         <div aria-label={getMobileEditorToolbarLabel(props.locale)} className="edgeever-editor-toolbar" role="toolbar">
-          {MOBILE_EDITOR_TOOLBAR_ACTIONS.map((action) => (
+          {MOBILE_EDITOR_TOOLBAR_ACTIONS.filter((action) => !(props.encryptedNote && action.id === "image")).map((action) => (
               <ToolbarButton
                 key={action.id}
                 active={action.activeFlag > 0 && Boolean(toolbarState & action.activeFlag)}

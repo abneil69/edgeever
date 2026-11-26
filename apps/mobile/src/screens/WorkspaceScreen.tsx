@@ -30,8 +30,22 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { Alert, Pressable, Text } from "../components/LocalizedText";
 import { ApiRequestError } from "@edgeever/client";
-import { DEFAULT_MEMO_TITLE, getNotebookScopeIds, hasDiagramDocumentMarker, markdownToDoc, type MemoDetail, type MemoSummary, type Notebook } from "@edgeever/shared";
+import {
+  DEFAULT_MEMO_TITLE,
+  emptyDoc,
+  getNotebookScopeIds,
+  hasDiagramDocumentMarker,
+  hasInfographicDocumentMarker,
+  hasPosterDocumentMarker,
+  hasTableDocumentMarker,
+  markdownToDoc,
+  type MemoDetail,
+  type MemoSummary,
+  type Notebook,
+} from "@edgeever/shared";
 import { MOBILE_UI_METRICS } from "@edgeever/shared/mobile-ui";
+import { createEncryptedMobileMemoOnline, isMobileEncryptedMemo, mobileE2eeSession } from "../lib/e2ee";
+import { MobileE2eeSetupModal, MobileE2eeUnlockModal } from "../components/e2ee/MobileE2eeModals";
 import { clearMobileMemoDraft, readMobileMemoDraft, type MobileMemoDraft } from "../lib/mobile-drafts";
 import {
   readMobileImageCompressionEnabled,
@@ -191,6 +205,13 @@ export const WorkspaceScreen = ({
   const [tagFilterPickerOpen, setTagFilterPickerOpen] = useState(false);
   const [richEditingSession, setRichEditingSession] = useState<RichEditingSession | null>(null);
   const [revisionMemo, setRevisionMemo] = useState<MemoDetail | null>(null);
+  const [e2eeSetupOpen, setE2eeSetupOpen] = useState(false);
+  const [e2eeUnlockOpen, setE2eeUnlockOpen] = useState(false);
+  const [e2eePendingAction, setE2eePendingAction] = useState<
+    | { kind: "create" }
+    | { kind: "encrypt"; memo: MemoDetail }
+    | null
+  >(null);
   const {
     clearSelection,
     enterSelectionMode,
@@ -512,6 +533,10 @@ export const WorkspaceScreen = ({
     // Keep the detail DomWebView mounted and switch it in place. Remounting the
     // editor costs ~1s, and waiting on a network refresh made tap-to-edit feel like 2-3s.
     beginEditorStartup();
+    if (isMobileEncryptedMemo(memo)) {
+      setRichEditingSession({ draft: null, initialFocus, memo });
+      return;
+    }
     const open = (draft: MobileMemoDraft | null) => {
       memoDraftPrefetchRef.current.delete(memo.id);
       setRichEditingSession({ draft, initialFocus, memo });
@@ -832,7 +857,7 @@ export const WorkspaceScreen = ({
   ]);
 
   useEffect(() => {
-    if (selectedMemo && !selectedMemo.isDeleted) {
+    if (selectedMemo && !selectedMemo.isDeleted && !isMobileEncryptedMemo(selectedMemo)) {
       void loadMemoDraft(selectedMemo.id);
     }
   }, [loadMemoDraft, selectedMemo]);
@@ -1059,6 +1084,7 @@ export const WorkspaceScreen = ({
   });
 
   const applyAiDraftToMemo = async (memo: MemoDetail, draft: string, mode: "append" | "replace") => {
+    if (isMobileEncryptedMemo(memo)) return;
     const normalizedDraft = draft.trim();
     const contentMarkdown = mode === "append"
       ? [memo.contentMarkdown.trimEnd(), normalizedDraft].filter(Boolean).join("\n\n")
@@ -1071,6 +1097,157 @@ export const WorkspaceScreen = ({
       },
     });
   };
+
+  const executeCreateEncryptedMemo = useCallback(async () => {
+    const e2eeCopy = getMobileCatalog(resolvedLocale).e2ee;
+    if (!client || !createMemoNotebookId) {
+      Alert.alert(e2eeCopy.newEncryptedNote, e2eeCopy.offlineCreateBlocked);
+      return;
+    }
+    try {
+      const created = await createEncryptedMobileMemoOnline({
+        client,
+        dataScope,
+        notebookId: createMemoNotebookId,
+      });
+      queryClient.setQueryData(["mobile", "memo", "notebook", created.id], { memo: created });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["mobile", "memos"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "search"] }),
+        queryClient.invalidateQueries({ queryKey: ["mobile", "notebooks"] }),
+      ]);
+      setActiveView("notes");
+      setMemoView("notebook");
+      setImageShareFromList(false);
+      setSelectedMemoId(created.id);
+    } catch (error) {
+      Alert.alert(
+        e2eeCopy.newEncryptedNote,
+        error instanceof Error ? error.message : e2eeCopy.offlineCreateBlocked,
+      );
+    }
+  }, [client, createMemoNotebookId, dataScope, queryClient, resolvedLocale]);
+
+  const handleRequestCreateEncryptedMemo = useCallback(() => {
+    if (!canCreateMemo) return;
+    const status = mobileE2eeSession.getSnapshot();
+    if (!status.configured) {
+      setE2eePendingAction({ kind: "create" });
+      setE2eeSetupOpen(true);
+      return;
+    }
+    if (!status.unlocked) {
+      setE2eePendingAction({ kind: "create" });
+      setE2eeUnlockOpen(true);
+      return;
+    }
+    void executeCreateEncryptedMemo();
+  }, [canCreateMemo, executeCreateEncryptedMemo]);
+
+  const confirmEncryptMemo = useCallback((memo: MemoDetail) => {
+    const catalog = getMobileCatalog(resolvedLocale);
+    const e2eeCopy = catalog.e2ee;
+    Alert.alert(e2eeCopy.encryptConfirmTitle, e2eeCopy.encryptConfirmDescription, [
+      { text: catalog.common.cancel, style: "cancel" },
+      {
+        text: e2eeCopy.encryptConfirmButton,
+        style: "destructive",
+        onPress: () => {
+          void (async () => {
+            try {
+              const sealed = await mobileE2eeSession.encryptMemo(memo.id, memo.contentMarkdown);
+              await localUpdateMemoMutation.mutateAsync({
+                memo,
+                payload: {
+                  contentJson: emptyDoc(),
+                  contentMarkdown: sealed.markdown,
+                },
+              });
+              await clearMobileMemoDraft(memo.id).catch(() => undefined);
+              queryClient.removeQueries({ queryKey: ["mobile", "memo-revisions", memo.id] });
+            } catch (error) {
+              Alert.alert(
+                e2eeCopy.encryptNoteAction,
+                error instanceof Error ? error.message : e2eeCopy.cannotEncryptAttachments,
+              );
+            }
+          })();
+        },
+      },
+    ]);
+  }, [localUpdateMemoMutation, queryClient, resolvedLocale]);
+
+  const handleRequestEncryptNote = useCallback((memo: MemoDetail) => {
+    const e2eeCopy = getMobileCatalog(resolvedLocale).e2ee;
+    if (isMobileEncryptedMemo(memo) || memo.isDeleted) return;
+    if (
+      hasDiagramDocumentMarker(memo.contentMarkdown)
+      || hasTableDocumentMarker(memo.contentMarkdown)
+      || hasPosterDocumentMarker(memo.contentMarkdown)
+      || hasInfographicDocumentMarker(memo.contentMarkdown)
+    ) {
+      Alert.alert(e2eeCopy.encryptNoteAction, e2eeCopy.cannotEncryptStructured);
+      return;
+    }
+    void (async () => {
+      try {
+        if (client) {
+          const { resources } = await client.listResources();
+          const hasAttachment = resources.some((resource) => resource.memoId === memo.id && !resource.memoDeleted)
+            || /\/api\/v1\/resources\//.test(memo.contentMarkdown);
+          if (hasAttachment) {
+            Alert.alert(e2eeCopy.encryptNoteAction, e2eeCopy.cannotEncryptAttachments);
+            return;
+          }
+        }
+      } catch {
+        // Server enforces attachment exclusion atomically on write.
+      }
+      const status = mobileE2eeSession.getSnapshot();
+      if (!status.configured) {
+        setE2eePendingAction({ kind: "encrypt", memo });
+        setE2eeSetupOpen(true);
+        return;
+      }
+      if (!status.unlocked) {
+        setE2eePendingAction({ kind: "encrypt", memo });
+        setE2eeUnlockOpen(true);
+        return;
+      }
+      confirmEncryptMemo(memo);
+    })();
+  }, [client, confirmEncryptMemo, resolvedLocale]);
+
+  const handleRequestDecryptNote = useCallback((memo: MemoDetail, plaintextMarkdown: string) => {
+    const catalog = getMobileCatalog(resolvedLocale);
+    const e2eeCopy = catalog.e2ee;
+    if (!isMobileEncryptedMemo(memo) || memo.isDeleted) return;
+    Alert.alert(e2eeCopy.decryptConfirmTitle, e2eeCopy.decryptConfirmDescription, [
+      { text: catalog.common.cancel, style: "cancel" },
+      {
+        text: e2eeCopy.decryptConfirmButton,
+        onPress: () => {
+          void (async () => {
+            try {
+              await localUpdateMemoMutation.mutateAsync({
+                memo,
+                payload: {
+                  contentJson: markdownToDoc(plaintextMarkdown),
+                  contentMarkdown: plaintextMarkdown,
+                },
+              });
+              mobileE2eeSession.evictMemoDek(memo.id);
+            } catch (error) {
+              Alert.alert(
+                e2eeCopy.decryptNoteAction,
+                error instanceof Error ? error.message : e2eeCopy.decryptFailed,
+              );
+            }
+          })();
+        },
+      },
+    ]);
+  }, [localUpdateMemoMutation, resolvedLocale]);
 
   const deleteMemoMutation = useMutation({
     onMutate: async ({ memo }) => {
@@ -1121,7 +1298,10 @@ export const WorkspaceScreen = ({
   });
 
   const shareMemoMutation = useMutation({
-    mutationFn: async (memo: Pick<MemoSummary, "id" | "title">) => {
+    mutationFn: async (memo: Pick<MemoSummary, "id" | "title" | "encrypted">) => {
+      if (memo.encrypted) {
+        throw new Error(getMobileCatalog(resolvedLocale).e2ee.encryptedCardHint);
+      }
       if (!client || !session) {
         throw new Error("Client is not ready");
       }
@@ -1445,8 +1625,10 @@ export const WorkspaceScreen = ({
         notebooks={notebooks}
         onClose={closeDetail}
         onCloseEditor={closeRichEditor}
+        onDecryptNote={handleRequestDecryptNote}
         onDelete={handleDeleteMemo}
         onDeleteResource={handleDeleteResource}
+        onEncryptNote={handleRequestEncryptNote}
         onRichEdit={openRichEditor}
         onOpenRevisions={setRevisionMemo}
         onRenameResource={handleRenameResource}
@@ -1540,8 +1722,38 @@ export const WorkspaceScreen = ({
         canCreate={canCreateMemo}
         onBlank={() => openCreateMemo()}
         onClose={() => setCreateChoiceOpen(false)}
+        onEncrypted={handleRequestCreateEncryptedMemo}
         onTemplate={openCreateFromTemplate}
         visible={createChoiceOpen}
+      />
+
+      <MobileE2eeSetupModal
+        client={client}
+        onClose={() => {
+          setE2eeSetupOpen(false);
+          if (!mobileE2eeSession.getSnapshot().unlocked) setE2eePendingAction(null);
+        }}
+        onConfigured={() => {
+          const action = e2eePendingAction;
+          setE2eePendingAction(null);
+          if (action?.kind === "create") void executeCreateEncryptedMemo();
+          else if (action?.kind === "encrypt") confirmEncryptMemo(action.memo);
+        }}
+        visible={e2eeSetupOpen}
+      />
+
+      <MobileE2eeUnlockModal
+        onClose={() => {
+          setE2eeUnlockOpen(false);
+          if (!mobileE2eeSession.getSnapshot().unlocked) setE2eePendingAction(null);
+        }}
+        onUnlocked={() => {
+          const action = e2eePendingAction;
+          setE2eePendingAction(null);
+          if (action?.kind === "create") void executeCreateEncryptedMemo();
+          else if (action?.kind === "encrypt") confirmEncryptMemo(action.memo);
+        }}
+        visible={e2eeUnlockOpen}
       />
 
       <MobileTemplatePickerModal
@@ -1609,7 +1821,7 @@ export const WorkspaceScreen = ({
       {selectionMoreOpen ? <SelectionMoreModal
         bottomOffset={58 + safeAreaInsets.bottom}
         canPin={memoView !== "trash" && selectedMemoIds.size > 0 && !pinMemosMutation.isPending}
-        canShare={memoView !== "trash" && selectedMemoIds.size === 1 && selectedMemos.length === 1 && !selectedMemos[0]?.isDeleted && !shareMemoMutation.isPending}
+        canShare={memoView !== "trash" && selectedMemoIds.size === 1 && selectedMemos.length === 1 && !selectedMemos[0]?.isDeleted && !selectedMemos[0]?.encrypted && !shareMemoMutation.isPending}
         canToggleVisibleSelection={canToggleVisibleSelection}
         onClear={clearSelection}
         onClose={() => setSelectionMoreOpen(false)}

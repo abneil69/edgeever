@@ -64,6 +64,11 @@ export const LayoutTemplate = createIcon("layout");
 export const Link = createIcon("link");
 export const List = createIcon("list");
 export const LockKeyhole = createIcon("lock");
+export const LockOpen = createIcon("unlock");
+export const Fingerprint = ({ color, ...props }: MaterialCommunityIconProps) => {
+  const { resolvedTheme } = useMobileTheme();
+  return <MaterialCommunityIcons name="fingerprint" {...props} color={resolveMobileThemeColor(color as string | undefined, resolvedTheme)} />;
+};
 export const LogOut = createIcon("log-out");
 export const Moon = createIcon("moon");
 export const Merge = createIcon("git-merge");

@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   DEFAULT_MEMO_TITLE,
+  docToMarkdown,
+  emptyDoc,
+  markdownToDoc,
   RESOURCE_THUMBNAIL_DEFAULT_WIDTH,
   parseDiagramDocument,
   type MemoDetail,
@@ -24,8 +27,10 @@ import { Image as RNImage, KeyboardAvoidingView, Platform, ScrollView, StyleShee
 import { Modal } from "react-native";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 import { SvgXml } from "react-native-svg";
-import { ActivityIndicator, ChevronDown, ChevronLeft, ChevronUp, Copy, Download, History, MoreHorizontal, Pencil, RotateCcw, Search, Share2, Sparkles, Tag, Trash2, X } from "../components/icons";
+import { ActivityIndicator, ChevronDown, ChevronLeft, ChevronUp, Copy, Download, History, LockKeyhole, LockOpen, MoreHorizontal, Pencil, RotateCcw, Search, Share2, Sparkles, Tag, Trash2, X } from "../components/icons";
 import { Alert, Pressable, Text, TextInput } from "../components/LocalizedText";
+import { MobileEncryptedNoteLockView } from "../components/e2ee/MobileEncryptedNoteLockView";
+import { isMobileEncryptedMemo, mobileE2eeSession, useMobileE2eeSession } from "../lib/e2ee";
 import LocalTiptapEditor, { type LocalTiptapEditorRef } from "../components/LocalTiptapEditor";
 import { MobileAiAssistantModal } from "../components/MobileAiAssistantModal";
 import MobileNoteImageFontPicker from "../components/MobileNoteImageFontPicker";
@@ -450,8 +455,10 @@ export const MemoDetailModal = ({
   onClose,
   onCloseEditor,
   onCopyLocalDraft,
+  onDecryptNote,
   onDelete,
   onDeleteResource,
+  onEncryptNote,
   onRichEdit,
   onOpenRevisions,
   onRenameResource,
@@ -485,8 +492,10 @@ export const MemoDetailModal = ({
   onClose: () => void;
   onCloseEditor: () => void;
   onCopyLocalDraft: (memo: MemoDetail) => void;
+  onDecryptNote?: (memo: MemoDetail, plaintextMarkdown: string) => void;
   onDelete: (memo: MemoDetail) => void;
   onDeleteResource: (memo: MemoDetail, target: MobileResourceTarget) => Promise<void>;
+  onEncryptNote?: (memo: MemoDetail) => void;
   onRichEdit: (memo: MemoDetail, initialFocus?: "body" | "title") => void;
   onOpenRevisions: (memo: MemoDetail) => void;
   onRenameResource: (memo: MemoDetail, target: MobileResourceTarget, filename: string) => Promise<void>;
@@ -504,6 +513,23 @@ export const MemoDetailModal = ({
   const imageShareStyles = useMemo(() => resolveMobileThemeStyles(baseImageShareStyles, resolvedTheme), [resolvedTheme]);
   const detailLayoutStyles = useMemo(() => resolveMobileThemeStyles(baseDetailLayoutStyles, resolvedTheme), [resolvedTheme]);
   const { resolvedLocale } = useMobileLocale();
+  const e2eeCopy = getMobileCatalog(resolvedLocale).e2ee;
+  const e2ee = useMobileE2eeSession();
+  const isEncryptedNote = isMobileEncryptedMemo(memo);
+  const rawCipherMemoRef = useRef<MemoDetail | null>(isEncryptedNote ? memo : null);
+  if (isEncryptedNote && memo) {
+    rawCipherMemoRef.current = memo;
+  } else if (!isEncryptedNote) {
+    rawCipherMemoRef.current = null;
+  }
+  const [decryptedState, setDecryptedState] = useState<{
+    memoId: string;
+    cipherMarkdown: string;
+    plaintextMarkdown: string;
+  } | null>(null);
+  const [decrypting, setDecrypting] = useState(false);
+  const [decryptError, setDecryptError] = useState<string | null>(null);
+  const [decryptAttempt, setDecryptAttempt] = useState(0);
   const safeAreaInsets = useSafeAreaInsets();
   const [actionsOpen, setActionsOpen] = useState(false);
   const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
@@ -568,25 +594,138 @@ export const MemoDetailModal = ({
     [memo?.id, resolvedLocale]
   );
 
+  useEffect(() => {
+    if (!visible || !memo || !isEncryptedNote || !e2ee.unlocked) {
+      setDecryptedState(null);
+      setDecrypting(false);
+      setDecryptError(null);
+      return;
+    }
+    if (
+      decryptedState
+      && decryptedState.memoId === memo.id
+      && decryptedState.cipherMarkdown === memo.contentMarkdown
+    ) {
+      setDecrypting(false);
+      setDecryptError(null);
+      return;
+    }
+    let cancelled = false;
+    setDecrypting(true);
+    setDecryptError(null);
+    void mobileE2eeSession.decryptMemo(memo.id, memo.contentMarkdown)
+      .then((result) => {
+        if (cancelled) return;
+        setDecryptedState({
+          memoId: memo.id,
+          cipherMarkdown: memo.contentMarkdown,
+          plaintextMarkdown: result.plaintextMarkdown,
+        });
+        setDecrypting(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setDecryptedState(null);
+        setDecrypting(false);
+        setDecryptError(e2eeCopy.decryptFailed);
+      });
+    return () => { cancelled = true; };
+  }, [decryptAttempt, decryptedState, e2ee.unlocked, e2eeCopy.decryptFailed, isEncryptedNote, memo, visible]);
+
+  const effectiveMemo = useMemo<MemoDetail | null>(() => {
+    if (!memo) return null;
+    if (!isEncryptedNote) return memo;
+    if (!e2ee.unlocked || !decryptedState || decryptedState.memoId !== memo.id) return null;
+    return {
+      ...memo,
+      contentMarkdown: decryptedState.plaintextMarkdown,
+      contentJson: markdownToDoc(decryptedState.plaintextMarkdown),
+      contentText: "",
+      excerpt: "",
+    };
+  }, [decryptedState, e2ee.unlocked, isEncryptedNote, memo]);
+
+  const isLockedEncryptedView = Boolean(isEncryptedNote && memo && (!e2ee.unlocked || !effectiveMemo));
+
+  const effectiveUpdateMutation = useMemo<MobileMemoUpdateMutation>(() => {
+    if (!isEncryptedNote) return updateMutation;
+    return {
+      ...updateMutation,
+      mutateAsync: async ({ memo: targetMemo, payload }) => {
+        const baseCipher = rawCipherMemoRef.current?.id === targetMemo.id
+          ? rawCipherMemoRef.current
+          : (memo ?? targetMemo);
+        if (payload.contentMarkdown !== undefined || payload.contentJson !== undefined) {
+          const plaintextMarkdown = payload.contentMarkdown
+            ?? (payload.contentJson ? docToMarkdown(payload.contentJson) : (decryptedState?.plaintextMarkdown ?? ""));
+          const sealed = await mobileE2eeSession.encryptMemo(
+            baseCipher.id,
+            plaintextMarkdown,
+            baseCipher.contentMarkdown,
+          );
+          const saved = await updateMutation.mutateAsync({
+            memo: baseCipher,
+            payload: {
+              ...payload,
+              contentJson: emptyDoc(),
+              contentMarkdown: sealed.markdown,
+            },
+          });
+          rawCipherMemoRef.current = saved;
+          setDecryptedState({
+            memoId: saved.id,
+            cipherMarkdown: saved.contentMarkdown,
+            plaintextMarkdown,
+          });
+          return {
+            ...saved,
+            contentMarkdown: plaintextMarkdown,
+            contentJson: payload.contentJson ?? markdownToDoc(plaintextMarkdown),
+            contentText: "",
+            excerpt: "",
+          };
+        }
+        const saved = await updateMutation.mutateAsync({ memo: baseCipher, payload });
+        rawCipherMemoRef.current = saved;
+        const currentPlain = decryptedState?.plaintextMarkdown ?? "";
+        return {
+          ...saved,
+          contentMarkdown: currentPlain,
+          contentJson: markdownToDoc(currentPlain),
+          contentText: "",
+          excerpt: "",
+        };
+      },
+    };
+  }, [decryptedState?.plaintextMarkdown, isEncryptedNote, memo, updateMutation]);
+
   const baseUrl = session?.baseUrl.replace(/\/+$/, "") ?? "";
   const viewerContent = useMemo<TiptapDoc>(
-    () => (memo ? resolveMobileMemoViewerContent(memo.contentJson, memo.contentMarkdown) : { type: "doc", content: [{ type: "paragraph" }] }),
-    [memo]
+    () => (effectiveMemo ? resolveMobileMemoViewerContent(effectiveMemo.contentJson, effectiveMemo.contentMarkdown) : { type: "doc", content: [{ type: "paragraph" }] }),
+    [effectiveMemo]
   );
   const isVisualDiagram = useMemo(
-    () => (memo ? hasMobileVisualDiagram(memo.contentMarkdown) : false),
-    [memo]
+    () => (effectiveMemo && !isEncryptedNote ? hasMobileVisualDiagram(effectiveMemo.contentMarkdown) : false),
+    [effectiveMemo, isEncryptedNote]
   );
   const isStructuredTable = useMemo(
-    () => (memo ? hasMobileStructuredTable(memo.contentMarkdown) : false),
-    [memo]
+    () => (effectiveMemo && !isEncryptedNote ? hasMobileStructuredTable(effectiveMemo.contentMarkdown) : false),
+    [effectiveMemo, isEncryptedNote]
   );
-  const locksRichTextEdit = isVisualDiagram || isStructuredTable || Boolean(memo && (hasMobileInfographic(memo.contentMarkdown) || hasMobilePoster(memo.contentMarkdown)));
+  const locksRichTextEdit = isLockedEncryptedView
+    || isVisualDiagram
+    || isStructuredTable
+    || Boolean(effectiveMemo && !isEncryptedNote && (hasMobileInfographic(effectiveMemo.contentMarkdown) || hasMobilePoster(effectiveMemo.contentMarkdown)));
   const visualDiagramJson = useMemo(() => {
-    const diagram = memo ? parseDiagramDocument(memo.contentMarkdown) : null;
+    const diagram = effectiveMemo && !isEncryptedNote ? parseDiagramDocument(effectiveMemo.contentMarkdown) : null;
     return diagram ? JSON.stringify(diagram) : undefined;
-  }, [memo]);
-  const isEditing = Boolean(editingSession);
+  }, [effectiveMemo, isEncryptedNote]);
+  const isEditing = Boolean(editingSession) && !isLockedEncryptedView;
+  useEffect(() => {
+    if (editingSession && isEncryptedNote && !e2ee.unlocked) {
+      onCloseEditor();
+    }
+  }, [e2ee.unlocked, editingSession, isEncryptedNote, onCloseEditor]);
   const noteBodyDom = useMemo(() => ({
     ...SAFE_DOM_WEBVIEW_PROPS,
     bounces: true,
@@ -605,12 +744,13 @@ export const MemoDetailModal = ({
     editorRef: viewerRef,
     handleHardwareBack: false,
     imageCompressionEnabled,
-    initialDraft: editingSession?.draft ?? null,
+    initialDraft: isEncryptedNote ? null : (editingSession?.draft ?? null),
     initialFocus: editingSession?.initialFocus ?? "body",
-    memo: editingSession?.memo ?? memo,
+    isEncryptedNote,
+    memo: isEncryptedNote ? effectiveMemo : (editingSession?.memo ?? effectiveMemo),
     notebooks,
     onClose: onCloseEditor,
-    updateMutation,
+    updateMutation: effectiveUpdateMutation,
   });
 
   const downloadResource = useCallback(async (target: MobileResourceTarget) => {
@@ -644,7 +784,7 @@ export const MemoDetailModal = ({
     }
     setMetadataSaving(true);
     try {
-      await updateMutation.mutateAsync({ memo, payload: { notebookId: viewerNotebookId, tags: viewerTags } });
+      await effectiveUpdateMutation.mutateAsync({ memo, payload: { notebookId: viewerNotebookId, tags: viewerTags } });
       setViewerTagsOpen(false);
     } catch (error) {
       Alert.alert("保存失败", error instanceof Error ? error.message : "请重试");
@@ -796,14 +936,14 @@ export const MemoDetailModal = ({
   }, [visible]);
 
   useEffect(() => {
-    if (!imageShareFromList || !visible) {
+    if (!imageShareFromList || !visible || isEncryptedNote) {
       imageShareOpenedMemoRef.current = null;
       return;
     }
     if (!memo || !viewerReady || imageShareOpenedMemoRef.current === memo.id) return;
     imageShareOpenedMemoRef.current = memo.id;
     setImageShareOptionsOpen(true);
-  }, [imageShareFromList, memo, viewerReady, visible]);
+  }, [imageShareFromList, isEncryptedNote, memo, viewerReady, visible]);
 
   const closeImageShareOptions = () => {
     imageFontRecoveryRef.current = null;
@@ -847,7 +987,7 @@ export const MemoDetailModal = ({
   }, [isEditing]);
 
   useEffect(() => {
-    const normalizedInitialSearchQuery = initialSearchQuery.trim();
+    const normalizedInitialSearchQuery = isEncryptedNote ? "" : initialSearchQuery.trim();
     setViewerReady(false);
     setTitleCollapsed(false);
     setSearchOpen(Boolean(normalizedInitialSearchQuery));
@@ -859,10 +999,10 @@ export const MemoDetailModal = ({
     setViewerNotebookPickerOpen(false);
     setViewerTagsOpen(false);
     resourceDataUrlCacheRef.current.clear();
-  }, [initialSearchQuery, memo?.id]);
+  }, [initialSearchQuery, isEncryptedNote, memo?.id]);
 
   useEffect(() => {
-    if (!viewerReady || !searchOpen) {
+    if (!viewerReady || !searchOpen || isEncryptedNote) {
       return;
     }
     const bodyMatchIndex = activeMatchIndex - metadataSearchMatchCount;
@@ -1066,7 +1206,7 @@ export const MemoDetailModal = ({
       intent?: "preview" | "share";
     } = {},
   ): void => {
-    if (!memo || !viewerReady || isExportingImage || imageExportRequestRef.current !== null) return;
+    if (isEncryptedNote || !memo || !viewerReady || isExportingImage || imageExportRequestRef.current !== null) return;
     const viewer = viewerRef.current;
     if (!viewer) {
       failImageExport(getMobileCatalog(resolvedLocale).mobile.imageShare.viewerNotReady);
@@ -1254,7 +1394,18 @@ export const MemoDetailModal = ({
                 {syncStatusLabel}
               </Text>
             </Pressable>
-            {memo && !memo.isDeleted ? (
+            {isEncryptedNote && e2ee.unlocked && !isEditing ? (
+              <Pressable
+                accessibilityLabel={e2eeCopy.lockNowButton}
+                accessibilityRole="button"
+                hitSlop={6}
+                onPress={() => void mobileE2eeSession.lock("manual")}
+                style={styles.detailHeaderIconButton}
+              >
+                <LockKeyhole color="#b45309" size={19} />
+              </Pressable>
+            ) : null}
+            {memo && !memo.isDeleted && !isLockedEncryptedView ? (
               <Pressable
                 accessibilityLabel="选择笔记标签"
                 accessibilityHint="点选已有标签，或输入名称创建新标签"
@@ -1267,7 +1418,7 @@ export const MemoDetailModal = ({
                 <Tag color={memo.tags.length > 0 ? "#16A06E" : "#475569"} size={20} />
               </Pressable>
             ) : null}
-            {memo && !memo.isDeleted ? (
+            {memo && !memo.isDeleted && !isEncryptedNote ? (
               <Pressable
                 accessibilityLabel="搜索当前笔记"
                 accessibilityRole="button"
@@ -1301,14 +1452,16 @@ export const MemoDetailModal = ({
               >
                 <Text style={styles.conflictBannerPrimaryButtonText}>采用云端并重新加载</Text>
               </Pressable>
-              <Pressable
-                accessibilityLabel="复制本地草稿"
-                accessibilityRole="button"
-                onPress={() => onCopyLocalDraft(memo)}
-                style={styles.conflictBannerSecondaryButton}
-              >
-                <Text style={styles.conflictBannerSecondaryButtonText}>复制本地草稿</Text>
-              </Pressable>
+              {!isEncryptedNote ? (
+                <Pressable
+                  accessibilityLabel="复制本地草稿"
+                  accessibilityRole="button"
+                  onPress={() => onCopyLocalDraft(memo)}
+                  style={styles.conflictBannerSecondaryButton}
+                >
+                  <Text style={styles.conflictBannerSecondaryButtonText}>复制本地草稿</Text>
+                </Pressable>
+              ) : null}
               <Pressable
                 accessibilityLabel="查看并处理同步冲突"
                 accessibilityRole="button"
@@ -1355,7 +1508,14 @@ export const MemoDetailModal = ({
           <View style={styles.centerState}>
             <ActivityIndicator color="#0f172a" />
           </View>
-        ) : memo ? (
+        ) : memo && isLockedEncryptedView ? (
+          <MobileEncryptedNoteLockView
+            decryptError={decryptError}
+            decrypting={e2ee.unlocked && decrypting}
+            memo={memo}
+            onRetryDecrypt={() => setDecryptAttempt((count) => count + 1)}
+          />
+        ) : effectiveMemo && memo ? (
           <View style={detailLayoutStyles.body}>
             {isEditing ? (
               <View style={{ paddingHorizontal: 12, paddingTop: 8 }}>
@@ -1382,17 +1542,19 @@ export const MemoDetailModal = ({
                     </Text>
                     <ChevronDown color="#94a3b8" size={14} />
                   </Pressable>
-                  <SmartTagButton
-                    client={client}
-                    contentMarkdown={editor.contentMarkdown}
-                    disabled={editor.saving || editor.uploading}
-                    onChange={(nextTags) => {
-                      editor.setTagsText(nextTags.join(", "));
-                      editor.markDirty();
-                    }}
-                    selectedTags={parseTags(editor.tagsText)}
-                    title={editor.title}
-                  />
+                  {!isEncryptedNote ? (
+                    <SmartTagButton
+                      client={client}
+                      contentMarkdown={editor.contentMarkdown}
+                      disabled={editor.saving || editor.uploading}
+                      onChange={(nextTags) => {
+                        editor.setTagsText(nextTags.join(", "));
+                        editor.markDirty();
+                      }}
+                      selectedTags={parseTags(editor.tagsText)}
+                      title={editor.title}
+                    />
+                  ) : null}
                 </View>
                 {editor.draftRestored ? <Text style={styles.richEditorDraftNotice}>已恢复上次未完成的本地草稿</Text> : null}
                 {editor.error ? <Text style={styles.richEditorInlineError}>{editor.error}</Text> : null}
@@ -1459,7 +1621,7 @@ export const MemoDetailModal = ({
                 </View>
               </View>
               ) : null}
-              {searchOpen ? (
+              {searchOpen && !isEncryptedNote ? (
                 <View style={styles.noteSearchPanel}>
                   <Search color="#64748b" size={16} />
                   <TextInput
@@ -1520,40 +1682,41 @@ export const MemoDetailModal = ({
             )}
             {baseUrl ? (
               <LocalTiptapEditor
-                key={`${memo.id}:${viewerGeneration}`}
-                aiPromptsJson={isEditing ? editor.aiPromptsJson : undefined}
+                key={`${memo.id}:${viewerGeneration}:${isEncryptedNote ? "enc" : "plain"}`}
+                aiPromptsJson={isEditing && !isEncryptedNote ? editor.aiPromptsJson : undefined}
                 autoFocus={isEditing && editingSession?.initialFocus === "body"}
                 baseUrl={baseUrl}
                 content={viewerContent}
                 dom={noteBodyDom}
+                encryptedNote={isEncryptedNote}
                 locale={resolvedLocale}
                 mode={isEditing ? "editor" : "viewer"}
-                onAiCancel={isEditing ? editor.cancelSelectionAi : undefined}
-                onAiRequest={isEditing ? editor.requestSelectionAi : undefined}
+                onAiCancel={isEditing && !isEncryptedNote ? editor.cancelSelectionAi : undefined}
+                onAiRequest={isEditing && !isEncryptedNote ? editor.requestSelectionAi : undefined}
                 onChange={isEditing ? editor.persistDraft : undefined}
-                onImagePreview={isEditing ? undefined : onImagePreview}
+                onImagePreview={isEditing || isEncryptedNote ? undefined : onImagePreview}
                 onDoublePress={isEditing || locksRichTextEdit ? undefined : async () => {
                   beginEditorStartup();
-                  onRichEdit(memo, "body");
+                  onRichEdit(effectiveMemo, "body");
                 }}
-                onImageExportEvent={handleImageExportEvent}
+                onImageExportEvent={isEncryptedNote ? undefined : handleImageExportEvent}
                 onLoadResource={isEditing ? editor.loadEditorResource : loadViewerResource}
-                onPickImage={isEditing ? editor.pickAndUploadImage : undefined}
+                onPickImage={isEditing && !isEncryptedNote ? editor.pickAndUploadImage : undefined}
                 onReady={async () => {
                   viewerRef.current = domViewerRef.current;
                   setViewerReady(Boolean(viewerRef.current));
                 }}
                 onReaderScroll={isEditing ? undefined : handleReaderScroll}
-                onResourcePress={isEditing ? editor.selectResource : onResourcePress}
-                onSearchResult={async (count, _index, resultQuery) => {
+                onResourcePress={isEncryptedNote ? undefined : (isEditing ? editor.selectResource : onResourcePress)}
+                onSearchResult={isEncryptedNote ? undefined : async (count, _index, resultQuery) => {
                   if (resultQuery === searchQuery) {
                     setBodySearchMatchCount(count);
                   }
                 }}
                 ref={domViewerRef}
                 theme={resolvedTheme}
-                visualDiagramJson={isEditing ? undefined : visualDiagramJson}
-                visualDiagramNote={!isEditing && isVisualDiagram}
+                visualDiagramJson={isEditing || isEncryptedNote ? undefined : visualDiagramJson}
+                visualDiagramNote={!isEditing && !isEncryptedNote && isVisualDiagram}
               />
             ) : (
               <View style={styles.centerState}>
@@ -1571,13 +1734,13 @@ export const MemoDetailModal = ({
             <Text style={styles.errorText}>笔记加载失败</Text>
           </View>
         )}
-        {memo && !memo.isDeleted && !locksRichTextEdit && !isEditing ? (
+        {effectiveMemo && !memo?.isDeleted && !locksRichTextEdit && !isEditing ? (
           <Pressable
             accessibilityLabel="编辑笔记"
             accessibilityRole="button"
             onPress={() => {
               beginEditorStartup();
-              onRichEdit(memo, "body");
+              onRichEdit(effectiveMemo, "body");
             }}
             style={[styles.detailEditFab, { bottom: editFabBottom }]}
           >
@@ -1593,12 +1756,14 @@ export const MemoDetailModal = ({
                 <Text style={styles.actionSheetTitle}>{getMobileCatalog(resolvedLocale).mobile.memoDetail.noteActions}</Text>
                 {!memo.isDeleted ? (
                   <>
-                    <DetailActionSheetItem
-                      disabled={isSharing}
-                      icon={isSharing ? <ActivityIndicator color="#16A06E" size="small" /> : <Share2 color="#0f172a" size={18} />}
-                      label={getMobileCatalog(resolvedLocale).mobile.memoDetail.shareNote}
-                      onPress={() => closeActionsAndRun(() => onShare(memo))}
-                    />
+                    {!isEncryptedNote ? (
+                      <DetailActionSheetItem
+                        disabled={isSharing}
+                        icon={isSharing ? <ActivityIndicator color="#16A06E" size="small" /> : <Share2 color="#0f172a" size={18} />}
+                        label={getMobileCatalog(resolvedLocale).mobile.memoDetail.shareNote}
+                        onPress={() => closeActionsAndRun(() => onShare(memo))}
+                      />
+                    ) : null}
                     <DetailActionSheetItem
                       icon={<History color="#0f172a" size={18} />}
                       label={getMobileCatalog(resolvedLocale).editor.versionHistory}
@@ -1606,7 +1771,30 @@ export const MemoDetailModal = ({
                     />
                   </>
                 ) : null}
-                {!memo.isDeleted && !locksRichTextEdit ? (
+                {isEncryptedNote && e2ee.unlocked ? (
+                  <DetailActionSheetItem
+                    icon={<LockKeyhole color="#b45309" size={18} />}
+                    label={e2eeCopy.lockNowButton}
+                    onPress={() => closeActionsAndRun(() => void mobileE2eeSession.lock("manual"))}
+                  />
+                ) : null}
+                {!memo.isDeleted && !isEncryptedNote && !locksRichTextEdit && onEncryptNote ? (
+                  <DetailActionSheetItem
+                    disabled={!canCopyMemoId || isSaving}
+                    icon={<LockKeyhole color="#0f172a" size={18} />}
+                    label={e2eeCopy.encryptNoteAction}
+                    onPress={() => closeActionsAndRun(() => onEncryptNote(memo))}
+                  />
+                ) : null}
+                {!memo.isDeleted && isEncryptedNote && e2ee.unlocked && effectiveMemo && onDecryptNote ? (
+                  <DetailActionSheetItem
+                    disabled={isSaving}
+                    icon={<LockOpen color="#0f172a" size={18} />}
+                    label={e2eeCopy.decryptNoteAction}
+                    onPress={() => closeActionsAndRun(() => onDecryptNote(memo, effectiveMemo.contentMarkdown))}
+                  />
+                ) : null}
+                {!memo.isDeleted && !locksRichTextEdit && !isEncryptedNote ? (
                   <DetailActionSheetItem
                     icon={<Sparkles color="#16A06E" size={18} />}
                     label={getMobileCatalog(resolvedLocale).aiAssistant.title}
@@ -1621,31 +1809,37 @@ export const MemoDetailModal = ({
                     : getMobileCatalog(resolvedLocale).editor.copyNoteIdAfterSync}
                   onPress={() => closeActionsAndRun(() => void copyMemoId())}
                 />
-                <DetailActionSheetItem
-                  disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
-                  icon={isExportingImage ? <ActivityIndicator color="#16A06E" size="small" /> : <Share2 color="#0f172a" size={18} />}
-                  label={isExportingImage
-                    ? getMobileCatalog(resolvedLocale).mobile.imageShare.generating
-                    : getMobileCatalog(resolvedLocale).editor.imageShare.title}
-                  onPress={() => closeActionsAndRun(() => setImageShareOptionsOpen(true))}
-                />
-                <DetailActionSheetItem
-                  disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
-                  icon={<Download color="#0f172a" size={18} />}
-                  label={getMobileCatalog(resolvedLocale).mobile.imageShare.advancedPng}
-                  onPress={() => closeActionsAndRun(() => exportMemoImage("png"))}
-                />
-                <DetailActionSheetItem
-                  disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
-                  icon={<Download color="#0f172a" size={18} />}
-                  label={getMobileCatalog(resolvedLocale).mobile.imageShare.advancedJpeg}
-                  onPress={() => closeActionsAndRun(() => exportMemoImage("jpeg"))}
-                />
+                {!isEncryptedNote ? (
+                  <>
+                    <DetailActionSheetItem
+                      disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
+                      icon={isExportingImage ? <ActivityIndicator color="#16A06E" size="small" /> : <Share2 color="#0f172a" size={18} />}
+                      label={isExportingImage
+                        ? getMobileCatalog(resolvedLocale).mobile.imageShare.generating
+                        : getMobileCatalog(resolvedLocale).editor.imageShare.title}
+                      onPress={() => closeActionsAndRun(() => setImageShareOptionsOpen(true))}
+                    />
+                    <DetailActionSheetItem
+                      disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
+                      icon={<Download color="#0f172a" size={18} />}
+                      label={getMobileCatalog(resolvedLocale).mobile.imageShare.advancedPng}
+                      onPress={() => closeActionsAndRun(() => exportMemoImage("png"))}
+                    />
+                    <DetailActionSheetItem
+                      disabled={isExportingImage || !viewerReady || !imageSharePreferencesReady}
+                      icon={<Download color="#0f172a" size={18} />}
+                      label={getMobileCatalog(resolvedLocale).mobile.imageShare.advancedJpeg}
+                      onPress={() => closeActionsAndRun(() => exportMemoImage("jpeg"))}
+                    />
+                  </>
+                ) : null}
                 {memo.isDeleted ? (
                   <>
-                    <DetailActionSheetItem icon={<Search color="#0f172a" size={18} />} label="搜索当前笔记" onPress={() => closeActionsAndRun(() => {
-                      setSearchOpen(true);
-                    })} />
+                    {!isEncryptedNote ? (
+                      <DetailActionSheetItem icon={<Search color="#0f172a" size={18} />} label="搜索当前笔记" onPress={() => closeActionsAndRun(() => {
+                        setSearchOpen(true);
+                      })} />
+                    ) : null}
                     <DetailActionSheetItem icon={<History color="#0f172a" size={18} />} label="版本历史" onPress={() => closeActionsAndRun(() => onOpenRevisions(memo))} />
                     <DetailActionSheetItem disabled={isRestoring} icon={<RotateCcw color="#0f172a" size={18} />} label={isRestoring ? "恢复中" : "恢复笔记"} onPress={() => closeActionsAndRun(() => onRestore(memo))} />
                     <View style={styles.listActionDivider} />
@@ -1900,7 +2094,7 @@ export const MemoDetailModal = ({
           </Pressable>
           )}
         </Modal>
-        {memo && !memo.isDeleted ? (
+        {memo && !memo.isDeleted && !isEncryptedNote ? (
           <MobileAiAssistantModal
             memo={memo}
             onApply={(draft, mode) => onApplyAiDraft(memo, draft, mode)}

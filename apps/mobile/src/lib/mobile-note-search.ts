@@ -48,12 +48,16 @@ export const getMobileNoteSearchMatches = (
 };
 
 export const createMobileNoteSearchHighlightPlugin = (options: {
+  disabled?: () => boolean;
   getActiveIndex: () => number;
   getQuery: () => string;
 }) => new Plugin({
   key: MOBILE_NOTE_SEARCH_HIGHLIGHT_PLUGIN_KEY,
   props: {
     decorations: (state) => {
+      if (options.disabled?.()) {
+        return DecorationSet.empty;
+      }
       const matches = getMobileNoteSearchMatches(state.doc, options.getQuery());
       if (matches.length === 0) {
         return DecorationSet.empty;

@@ -1,4 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { hasEncryptedNoteMarker } from "@edgeever/shared";
 
 const MOBILE_DRAFT_PREFIX = "edgeever.mobile.memoDraft:";
 const MOBILE_NEW_DRAFT_PREFIX = "edgeever.mobile.newMemoDraft:";
@@ -36,7 +37,12 @@ export const readMobileMemoDraft = async (memoId: string): Promise<MobileMemoDra
   }
 };
 
-export const writeMobileMemoDraft = (draft: MobileMemoDraft) => AsyncStorage.setItem(getMobileMemoDraftKey(draft.memoId), JSON.stringify(draft));
+export const writeMobileMemoDraft = (draft: MobileMemoDraft) => {
+  if (hasEncryptedNoteMarker(draft.contentMarkdown)) {
+    return Promise.resolve();
+  }
+  return AsyncStorage.setItem(getMobileMemoDraftKey(draft.memoId), JSON.stringify(draft));
+};
 
 export const clearMobileMemoDraft = (memoId: string) => AsyncStorage.removeItem(getMobileMemoDraftKey(memoId));
 

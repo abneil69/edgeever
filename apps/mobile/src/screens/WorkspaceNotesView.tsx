@@ -4,7 +4,7 @@ import { DEFAULT_MEMO_TITLE, getMemoListTimestamp, getNotebookDescendantMemoCoun
 import { toggleMobileMemoFilterMode } from "@edgeever/shared/mobile-ui";
 import { FlatList, Platform, RefreshControl, useWindowDimensions, View } from "react-native";
 import { Gesture, GestureDetector, MouseButton, PointerType } from "react-native-gesture-handler";
-import { ActivityIndicator, Check, ChevronDown, ChevronLeft, LayoutTemplate, MoreHorizontal, Plus, RotateCcw, Search, Sparkles, Tag, X } from "../components/icons";
+import { ActivityIndicator, Check, ChevronDown, ChevronLeft, LayoutTemplate, LockKeyhole, MoreHorizontal, Plus, RotateCcw, Search, Sparkles, Tag, X } from "../components/icons";
 import { Pressable, Text, TextInput } from "../components/LocalizedText";
 import type { MobileBootstrapProgress } from "../lib/local-mirror";
 import { useMobileLocale, getMobileCatalog } from "../lib/mobile-locale";
@@ -498,13 +498,18 @@ const MemoCard = memo(function MemoCard({
             {memo.isPinned ? (
               <Text accessibilityElementsHidden importantForAccessibility="no-hide-descendants" style={styles.memoPinnedStar}>★</Text>
             ) : null}
+            {memo.encrypted ? (
+              <LockKeyhole color="#b45309" size={14} />
+            ) : null}
             <Text numberOfLines={1} style={styles.memoTitle}>
               {memoTitle}
             </Text>
           </View>
           {listDensity === "preview" ? (
             <Text numberOfLines={2} style={styles.memoExcerpt}>
-              {memo.excerpt || "空笔记"}
+              {memo.encrypted
+                ? getMobileCatalog(resolvedLocale).e2ee.encryptedCardHint
+                : (memo.excerpt || "空笔记")}
             </Text>
           ) : null}
           <View style={[styles.memoMeta, listDensity === "compact" && styles.memoMetaCompact]}>

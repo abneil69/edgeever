@@ -19,6 +19,7 @@ import {
   flushMobileEditor,
 } from "../lib/mobile-editor-controller";
 import { clearMobileMemoDraft, writeMobileMemoDraft, type MobileMemoDraft } from "../lib/mobile-drafts";
+import { mobileE2eeSession } from "../lib/e2ee";
 import { prepareUploadAsset } from "../lib/mobile-image-upload";
 import { localizeMissingNotebookName, useMobileLocale, getMobileCatalog, formatMobileCopy, type MobileLocale } from "../lib/mobile-locale";
 import { useSession } from "../lib/session";
@@ -88,6 +89,7 @@ export const useMobileRichEditor = ({
   imageCompressionEnabled,
   initialDraft,
   initialFocus = "body",
+  isEncryptedNote = false,
   memo,
   notebooks,
   onClose,
@@ -101,6 +103,7 @@ export const useMobileRichEditor = ({
   imageCompressionEnabled: boolean;
   initialDraft: MobileMemoDraft | null;
   initialFocus?: "body" | "title";
+  isEncryptedNote?: boolean;
   memo: MemoDetail | null;
   notebooks: Notebook[];
   onClose: () => void;
@@ -108,7 +111,7 @@ export const useMobileRichEditor = ({
 }) => {
   const { client, session } = useSession();
   const { resolvedLocale } = useMobileLocale();
-  const restoredDraft = restoreDraft(memo, initialDraft);
+  const restoredDraft = isEncryptedNote ? null : restoreDraft(memo, initialDraft);
   const initialContentJson = restoredDraft
     ? markdownToDoc(restoredDraft.contentMarkdown)
     : resolveMemoContentDoc(memo?.contentJson, memo?.contentMarkdown);
@@ -188,7 +191,7 @@ export const useMobileRichEditor = ({
     }
     sessionKeyRef.current = sessionKey;
     memoBaseRef.current = memo;
-    const nextDraft = restoreDraft(memo, initialDraft);
+    const nextDraft = isEncryptedNote ? null : restoreDraft(memo, initialDraft);
     const nextContentJson = nextDraft
       ? markdownToDoc(nextDraft.contentMarkdown)
       : resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
@@ -249,6 +252,9 @@ export const useMobileRichEditor = ({
     setError(null);
     flushResolverRef.current?.();
     flushResolverRef.current = null;
+    if (isEncryptedNote) {
+      return;
+    }
     await writeMobileMemoDraft({
       memoId: currentMemo.id,
       expectedRevision: currentMemo.revision,
@@ -374,7 +380,7 @@ export const useMobileRichEditor = ({
 
   const pickAndUploadImage = async () => {
     const currentMemo = memoBaseRef.current;
-    if (!client || !currentMemo || uploadingRef.current) {
+    if (isEncryptedNote || !client || !currentMemo || uploadingRef.current) {
       return;
     }
     if (currentMemo.id.startsWith("local:")) {
@@ -441,7 +447,7 @@ export const useMobileRichEditor = ({
 
   useEffect(() => {
     const currentMemo = memoBaseRef.current;
-    if (!active || !currentMemo || !dirty) {
+    if (!active || !currentMemo || !dirty || isEncryptedNote) {
       return;
     }
     const timeout = setTimeout(() => {
@@ -456,7 +462,23 @@ export const useMobileRichEditor = ({
       });
     }, 350);
     return () => clearTimeout(timeout);
-  }, [active, dirty, memo, notebookId, tagsText, title]);
+  }, [active, dirty, isEncryptedNote, memo, notebookId, tagsText, title]);
+
+  const flushAndSaveRef = useRef<() => Promise<void>>(async () => undefined);
+  flushAndSaveRef.current = async () => {
+    if (!active || !memoBaseRef.current) return;
+    await flushEditor();
+    if (dirtyRef.current) {
+      await save();
+    }
+  };
+
+  useEffect(() => {
+    if (!active || !isEncryptedNote) return;
+    return mobileE2eeSession.registerBeforeLockFlush(async () => {
+      await flushAndSaveRef.current();
+    });
+  }, [active, isEncryptedNote]);
 
   useEffect(() => {
     if (!memoBaseRef.current || !shouldScheduleMobileEditorAutosave({

@@ -1,11 +1,12 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { DEFAULT_MEMO_TITLE, type MemoDetail, type MemoRevision } from "@edgeever/shared";
+import { DEFAULT_MEMO_TITLE, hasEncryptedNoteMarker, type MemoDetail, type MemoRevision } from "@edgeever/shared";
 import { History, RotateCcw, X } from "../components/icons";
 import { Modal, ScrollView, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Alert, Pressable, Text } from "../components/LocalizedText";
-import { useMobileLocale } from "../lib/mobile-locale";
+import { mobileE2eeSession, useMobileE2eeSession } from "../lib/e2ee";
+import { getMobileCatalog, useMobileLocale } from "../lib/mobile-locale";
 import { useSession } from "../lib/session";
 import { formatDate, formatRevisionActor } from "./workspace-utils";
 import { styles } from "./workspace-styles";
@@ -56,8 +57,11 @@ export const RevisionHistoryModal = ({
 }) => {
   const { client } = useSession();
   const queryClient = useQueryClient();
-  const localePreference = useMobileLocale().preference;
+  const { preference: localePreference, resolvedLocale } = useMobileLocale();
+  const e2ee = useMobileE2eeSession();
+  const e2eeCopy = getMobileCatalog(resolvedLocale).e2ee;
   const [selectedRevisionId, setSelectedRevisionId] = useState<string | null>(null);
+  const [decryptedRevisionMarkdown, setDecryptedRevisionMarkdown] = useState<string>("");
 
   const revisionsQuery = useQuery({
     queryKey: ["mobile", "memo-revisions", memo?.id],
@@ -73,6 +77,28 @@ export const RevisionHistoryModal = ({
 
   const revisions = revisionsQuery.data?.revisions ?? [];
   const selectedRevision = revisions.find((revision) => revision.id === selectedRevisionId) ?? revisions[0] ?? null;
+  const selectedRevisionEncrypted = Boolean(selectedRevision && hasEncryptedNoteMarker(selectedRevision.contentMarkdown));
+
+  useEffect(() => {
+    const raw = selectedRevision?.contentMarkdown ?? "";
+    if (!memo || !selectedRevision || !hasEncryptedNoteMarker(raw)) {
+      setDecryptedRevisionMarkdown(raw);
+      return;
+    }
+    if (!e2ee.unlocked) {
+      setDecryptedRevisionMarkdown("");
+      return;
+    }
+    let cancelled = false;
+    void mobileE2eeSession.decryptMemo(memo.id, raw)
+      .then((result) => {
+        if (!cancelled) setDecryptedRevisionMarkdown(result.plaintextMarkdown);
+      })
+      .catch(() => {
+        if (!cancelled) setDecryptedRevisionMarkdown(e2eeCopy.encryptedRevisionDecryptFailed);
+      });
+    return () => { cancelled = true; };
+  }, [e2ee.unlocked, e2eeCopy.encryptedRevisionDecryptFailed, memo, selectedRevision]);
 
   useEffect(() => {
     if (memo && revisions.length > 0 && !selectedRevisionId) {
@@ -187,7 +213,11 @@ export const RevisionHistoryModal = ({
 
           {selectedRevision ? (
             <View style={styles.revisionPreviewCard}>
-              <Text selectable style={styles.revisionPreviewText}>{selectedRevision.contentMarkdown || "空笔记"}</Text>
+              <Text selectable style={styles.revisionPreviewText}>
+                {selectedRevisionEncrypted && !e2ee.unlocked
+                  ? e2eeCopy.encryptedCardHint
+                  : (decryptedRevisionMarkdown || "空笔记")}
+              </Text>
             </View>
           ) : null}
           {restoreRevisionMutation.error ? (

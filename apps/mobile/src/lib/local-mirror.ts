@@ -1,5 +1,7 @@
 import type { createEdgeEverClient, ListMemosResponse, MemoFilterMode, MemoSortMode } from "@edgeever/client";
 import {
+  emptyDoc,
+  hasEncryptedNoteMarker,
   hasSyncStateReset,
   isSyncMetadataInitialized,
   splitSyncBootstrapWriteBatches,
@@ -188,6 +190,19 @@ export const listLocalMemos = async (scope: string, params: LocalMemoListParams)
   };
 };
 
+const sanitizeMobileMemoForLocalMirror = (memo: MemoDetail): MemoDetail => {
+  if (!memo.encrypted && !hasEncryptedNoteMarker(memo.contentMarkdown)) {
+    return memo;
+  }
+  return {
+    ...memo,
+    excerpt: "",
+    contentText: "",
+    contentJson: emptyDoc(),
+    encrypted: true,
+  };
+};
+
 export const getLocalMemo = async (scope: string, memoId: string): Promise<MemoDetail | null> => {
   const db = await getDatabase();
   const row = await db.getFirstAsync<StoredMemoRow>(
@@ -195,7 +210,7 @@ export const getLocalMemo = async (scope: string, memoId: string): Promise<MemoD
     scope,
     memoId
   );
-  return row ? JSON.parse(row.data_json) as MemoDetail : null;
+  return row ? sanitizeMobileMemoForLocalMirror(JSON.parse(row.data_json) as MemoDetail) : null;
 };
 
 export const resolveLocalMemo = async (scope: string, memoId: string): Promise<MemoDetail | null> => {
@@ -406,8 +421,9 @@ const upsertNotebook = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: stri
     JSON.stringify(notebook)
   );
 
-const upsertMemo = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: string, memo: MemoDetail) =>
-  db.runAsync(
+const upsertMemo = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: string, rawMemo: MemoDetail) => {
+  const memo = sanitizeMobileMemoForLocalMirror(rawMemo);
+  return db.runAsync(
     `INSERT OR REPLACE INTO mobile_memos
       (scope, id, notebook_id, title, content_text, tags_text, is_pinned, is_deleted, created_at, updated_at, deleted_at, data_json)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -424,6 +440,7 @@ const upsertMemo = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: string, 
     memo.deletedAt,
     JSON.stringify(memo)
   );
+};
 
 const setCursor = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: string, cursor: number) =>
   db.runAsync(
@@ -439,17 +456,21 @@ const setSyncIdentity = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: str
     identity
   );
 
-const toMemoSummary = (memo: MemoDetail): MemoSummary => ({
-  id: memo.id,
-  notebookId: memo.notebookId,
-  title: memo.title,
-  excerpt: memo.excerpt,
-  tags: memo.tags,
-  isPinned: memo.isPinned,
-  isArchived: memo.isArchived,
-  isDeleted: memo.isDeleted,
-  revision: memo.revision,
-  createdAt: memo.createdAt,
-  updatedAt: memo.updatedAt,
-  deletedAt: memo.deletedAt,
-});
+const toMemoSummary = (rawMemo: MemoDetail): MemoSummary => {
+  const memo = sanitizeMobileMemoForLocalMirror(rawMemo);
+  return {
+    id: memo.id,
+    notebookId: memo.notebookId,
+    title: memo.title,
+    excerpt: memo.encrypted ? "" : memo.excerpt,
+    ...(memo.encrypted ? { encrypted: true } : {}),
+    tags: memo.tags,
+    isPinned: memo.isPinned,
+    isArchived: memo.isArchived,
+    isDeleted: memo.isDeleted,
+    revision: memo.revision,
+    createdAt: memo.createdAt,
+    updatedAt: memo.updatedAt,
+    deletedAt: memo.deletedAt,
+  };
+};

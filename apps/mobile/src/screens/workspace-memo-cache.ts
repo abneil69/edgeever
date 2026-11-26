@@ -1,5 +1,5 @@
 import { type InfiniteData, type QueryClient } from "@tanstack/react-query";
-import type { MemoDetail, MemoSummary, Notebook, TiptapDoc } from "@edgeever/shared";
+import { emptyDoc, hasEncryptedNoteMarker, type MemoDetail, type MemoSummary, type Notebook, type TiptapDoc } from "@edgeever/shared";
 import { listLocalMemos } from "../lib/local-mirror";
 import { memoHasExactTag } from "../lib/mobile-tags";
 import { markdownToLocalText, sortMemoSummaries } from "./workspace-utils";
@@ -20,7 +20,8 @@ export const createOptimisticMemo = (
   payload: MobileMemoUpdatePayload
 ): MemoDetail => {
   const contentMarkdown = payload.contentMarkdown ?? memo.contentMarkdown;
-  const contentText = markdownToLocalText(contentMarkdown);
+  const encrypted = hasEncryptedNoteMarker(contentMarkdown);
+  const contentText = encrypted ? "" : markdownToLocalText(contentMarkdown);
 
   return {
     ...memo,
@@ -28,12 +29,13 @@ export const createOptimisticMemo = (
     ...(payload.isPinned !== undefined ? { isPinned: payload.isPinned } : {}),
     ...(payload.notebookId !== undefined ? { notebookId: payload.notebookId } : {}),
     ...(payload.tags !== undefined ? { tags: payload.tags } : {}),
-    ...(payload.contentJson !== undefined ? { contentJson: payload.contentJson } : {}),
+    ...(payload.contentJson !== undefined ? { contentJson: encrypted ? emptyDoc() : payload.contentJson } : {}),
     ...(payload.contentMarkdown !== undefined
       ? {
           contentMarkdown,
           contentText,
-          excerpt: contentText.slice(0, 180),
+          excerpt: encrypted ? "" : contentText.slice(0, 180),
+          ...(encrypted ? { contentJson: emptyDoc(), encrypted: true } : { encrypted: false }),
         }
       : {}),
     updatedAt: new Date().toISOString(),

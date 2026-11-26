@@ -4,6 +4,9 @@ import { useQueryClient } from "@tanstack/react-query";
 import { fetch as expoFetch } from "expo/fetch";
 import * as SecureStore from "expo-secure-store";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { AppState } from "react-native";
+import { createMobileDataScope } from "./local-mirror";
+import { mobileE2eeSession } from "./e2ee";
 import { MISSING_MOBILE_SESSION_MESSAGE } from "./login-error";
 
 const SESSION_KEY = "edgeever.mobile.session";
@@ -117,12 +120,33 @@ export const SessionProvider = ({ children }: { children: ReactNode }) => {
       fetch: createRebindAwareFetch(markRebindRequired),
       directAiGeneration: true,
       onUnauthorized: () => {
+        void mobileE2eeSession.lock("logout");
         queryClient.clear();
         setSession(null);
         void SecureStore.deleteItemAsync(SESSION_KEY);
       },
     });
   }, [markRebindRequired, queryClient, session]);
+
+  useEffect(() => {
+    if (!session) {
+      void mobileE2eeSession.lock("logout");
+      return;
+    }
+    const scope = createMobileDataScope(session.baseUrl, session.user?.id);
+    let cancelled = false;
+    void mobileE2eeSession.setScope(scope).then(() => {
+      if (cancelled || !client) return;
+      return mobileE2eeSession.refreshKeyring(() => client.getE2eeKeyring()).catch(() => undefined);
+    });
+    const detach = mobileE2eeSession.attachLifecycleListeners((listener) =>
+      AppState.addEventListener("change", listener),
+    );
+    return () => {
+      cancelled = true;
+      detach();
+    };
+  }, [client, session]);
 
   const acceptAuthSession = useCallback(async (baseUrl: string, authSession: AuthSession) => {
     if (!authSession.authenticated || !authSession.sessionToken) {
@@ -182,6 +206,7 @@ export const SessionProvider = ({ children }: { children: ReactNode }) => {
   }, [persistSession, queryClient]);
 
   const signOut = useCallback(async () => {
+    await mobileE2eeSession.lock("logout");
     if (client) {
       await client.logout().catch(() => undefined);
     }
