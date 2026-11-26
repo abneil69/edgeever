@@ -1,5 +1,6 @@
 import {
   SUPPORTED_IMAGE_MIME_TYPES,
+  hasEncryptedNoteMarker,
   isPdfAttachment,
   resolvePlayableMediaMimeType,
   setSvgResourceSecurityHeaders,
@@ -317,6 +318,29 @@ type ResourceCreateInput = {
   workspaceId?: string;
 };
 
+export const assertMemoNotEncryptedForResources = async (
+  db: DatabaseAdapter,
+  workspaceId: string,
+  memoId: string,
+) => {
+  const row = await db
+    .prepare(
+      `SELECT c.content_markdown
+       FROM memos m
+       INNER JOIN memo_contents c ON c.memo_id = m.id
+       WHERE m.id = ? AND m.workspace_id = ?`,
+    )
+    .bind(memoId, workspaceId)
+    .first<{ content_markdown: string }>();
+  if (row && hasEncryptedNoteMarker(row.content_markdown)) {
+    throw new AppError(
+      "encrypted_memo_resources_forbidden",
+      "Images and attachments cannot be attached to an encrypted note.",
+      409,
+    );
+  }
+};
+
 const storeResource = async (
   context: AppContext,
   input: ResourceCreateInput & {
@@ -331,6 +355,7 @@ const storeResource = async (
   const resourceId = input.resourceId?.trim() || createId("res");
   const now = isoNow();
   const workspaceId = input.workspaceId ?? getWorkspaceId(context);
+  await assertMemoNotEncryptedForResources(context.env.storage.db, workspaceId, input.memoId);
   const filename = normalizeFilename(input.filename) || `${resourceId}${input.objectKeyExtension ?? ""}`;
   const metadata = input.kind === "attachment"
     ? { ...input.metadata, originalFilename: filename }

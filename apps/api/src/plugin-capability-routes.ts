@@ -1,4 +1,4 @@
-import { PluginAiGenerateSchema, PluginPublicFetchSchema, type PluginAiGenerateRequest, type PluginAiStatus } from '@edgeever/shared';
+import { hasEncryptedNoteMarker, PluginAiGenerateSchema, PluginPublicFetchSchema, type PluginAiGenerateRequest, type PluginAiStatus } from '@edgeever/shared';
 import { zValidator } from '@hono/zod-validator';
 import { bodyLimit } from 'hono/body-limit';
 import type { Hono } from 'hono';
@@ -31,6 +31,9 @@ export function registerPluginCapabilityRoutes(app: Hono<AppEnv>, dependencies: 
   app.post('/api/v1/plugins/ai/generate/prepare', zValidator('json', PluginAiGenerateSchema), async c => {
     try {
       const input = c.req.valid('json');
+      if (hasEncryptedNoteMarker(input.prompt) || hasEncryptedNoteMarker(input.system)) {
+        return apiError(c, 'encrypted_memo_ai_forbidden', 'Encrypted note content cannot be sent to AI features.', 409);
+      }
       const loadCredentials = dependencies.loadCredentials ?? loadDefaultAiModelCredentials;
       const credentials = await loadCredentials(c.env.storage?.db, getWorkspaceId(c), c.env);
       return c.json({

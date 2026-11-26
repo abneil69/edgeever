@@ -1,3 +1,4 @@
+import { hasEncryptedNoteMarker } from "@edgeever/shared";
 import { getMemoDisplayTitle } from "@edgeever/shared/memo-title";
 import { isValidMemoShareSlug } from "@edgeever/shared/share-slug";
 import { PUBLIC_PAGE_HEADERS, PUBLIC_PAGE_ROBOTS } from "@edgeever/shared/public-page-headers";
@@ -142,7 +143,8 @@ export const renderPublicMemoSharePage = async (
   if (!target) return null;
 
   const token = await resolveMemoShareToken(db, target.segment);
-  const row = token ? await loadShare(db, token) : null;
+  const rawRow = token ? await loadShare(db, token) : null;
+  const row = rawRow && !hasEncryptedNoteMarker(rawRow.content_markdown) ? rawRow : null;
   const expired = Boolean(row) && isMemoShareExpired(row?.expires_at);
   const locked = !expired && Boolean(row?.password_hash);
   const readable = Boolean(row) && !expired && !locked;

@@ -5,6 +5,7 @@ import {
   AI_PROMPT_PARAMETER_KINDS,
   AI_PROMPT_RESULT_MODES,
 } from "./ai-assistant";
+import { WorkspaceE2eeKeyringSchema } from "./schemas";
 import type { AiPromptTemplate, MemoDetail, Notebook, Resource } from "./types";
 
 export const EDGEEVER_ZIP_FORMAT = "edgeever-zip";
@@ -110,6 +111,7 @@ const MemoDetailSchema = z.object({
   notebookId: z.string().trim().min(1),
   title: z.string().nullable(),
   excerpt: z.string(),
+  encrypted: z.boolean().optional(),
   tags: z.array(z.string()),
   isPinned: z.boolean(),
   isArchived: z.boolean(),
@@ -200,6 +202,12 @@ export const JsonBackupAiPromptSchema = z.object({
 export const RestoreJsonAiPromptsSchema = z.object({
   prompts: z.array(JsonBackupAiPromptSchema).max(100),
 });
+
+export const RestoreJsonE2eeKeyringSchema = z.object({
+  e2eeKeyring: WorkspaceE2eeKeyringSchema,
+});
+
+export type RestoreJsonE2eeKeyringInput = z.infer<typeof RestoreJsonE2eeKeyringSchema>;
 
 export const JsonBackupResourceMetadataSchema = JsonBackupMemoSchema.shape.resources.element;
 

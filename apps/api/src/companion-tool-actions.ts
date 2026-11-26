@@ -1,4 +1,4 @@
-import { CompanionToolPlanSchema, normalizeTags, type CompanionAction, type CompanionActionNote } from "@edgeever/shared";
+import { CompanionToolPlanSchema, hasEncryptedNoteMarker, normalizeTags, type CompanionAction, type CompanionActionNote } from "@edgeever/shared";
 import { AppError } from "./app-error";
 import type { AppContext } from "./api-context";
 import type { CompanionScope } from "./companion-service";
@@ -27,11 +27,25 @@ export async function proposeCompanionToolAction(db: DatabaseAdapter, scope: Com
   for (const id of new Set([...ids, ...evidenceIds])) {
     const memo = await getMemoDetail(db, scope.workspaceId, id, toolName === "restore_memos");
     if (!memo) throw stale();
+    const isEncrypted = memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown);
+    if (
+      isEncrypted
+      && (
+        toolName === "merge_memos"
+        || toolName === "update_poster"
+        || toolName === "update_diagram"
+        || toolName === "restore_memo_revision"
+        || toolName === "create_note_template"
+        || (toolName === "update_memo" && args.contentMarkdown !== undefined)
+      )
+    ) {
+      throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be modified by companion actions.", 409);
+    }
     if ((toolName === "update_memo" || toolName === "update_poster" || toolName === "merge_memos") && inspected.get(id) !== memo.revision) {
       throw new AppError("companion_action_unread", "Read the complete source notes before changing their content or merging them.", 400);
     }
     notes.push({ id, title: memo.title ?? "", revision: memo.revision, notebookId: memo.notebookId,
-      updatedAt: memo.updatedAt, tags: memo.tags, excerpt: memo.excerpt.slice(0, 300) });
+      updatedAt: memo.updatedAt, tags: memo.tags, excerpt: isEncrypted ? "" : memo.excerpt.slice(0, 300) });
   }
   if (toolName === "add_tags_to_memos" && notes.some(note => new Set([...note.tags, ...normalizeTags(args.tags as string[])]).size > 24)) {
     throw new AppError("companion_action_tag_limit", "Adding these tags would exceed the limit; existing tags will not be removed.", 400);

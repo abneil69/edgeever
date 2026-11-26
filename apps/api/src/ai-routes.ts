@@ -16,6 +16,7 @@ import {
   AiTagSuggestionsRequestSchema,
   buildAiTagSuggestionRequest,
   getDefaultAiTagSuggestionPrompt,
+  hasEncryptedNoteMarker,
   isAiModelCapabilityStale,
   planAiGenerationOutputBudget,
   resolveAiModelOutputBudget,
@@ -981,6 +982,14 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
       if (denied) return denied;
       try {
         const input = context.req.valid("json");
+        if (hasEncryptedNoteMarker(input.contentMarkdown)) {
+          return apiError(
+            context,
+            "encrypted_memo_ai_forbidden",
+            "Encrypted note content cannot be sent to AI features.",
+            409,
+          );
+        }
         const workspaceId = getWorkspaceId(context);
         const tagSummaries = await listTagSummaries(context.env.storage.db, workspaceId);
         const allCanonicalTags = new Map(
@@ -1042,6 +1051,14 @@ export const registerAiRoutes = (app: Hono<AppEnv>, dependencies: AiRouteDepende
       if (denied) return denied;
       try {
         const input = context.req.valid("json");
+        if (hasEncryptedNoteMarker(input.contentMarkdown)) {
+          return apiError(
+            context,
+            "encrypted_memo_ai_forbidden",
+            "Encrypted note content cannot be sent to AI features.",
+            409,
+          );
+        }
         const fields = await resolveAiGenerateFields(context, input);
         const model = await resolveDefaultAiModel(
           context.env.storage.db,

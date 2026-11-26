@@ -605,12 +605,13 @@ export const preparePendingResourceBinding = async (
         id, memo_id, bucket_name, object_key, storage_config_id, kind, mime_type, filename,
         byte_size, sha256, width, height, metadata_json, created_at, updated_at
       )
-      SELECT ?, m.id, p.bucket_name, p.object_key, p.storage_config_id, p.kind, p.mime_type, p.filename,
+      SELECT ?, mc.memo_id, p.bucket_name, p.object_key, p.storage_config_id, p.kind, p.mime_type, p.filename,
              p.byte_size, p.sha256, NULL, NULL, p.metadata_json, ?, ?
       FROM (SELECT 1) AS one
       LEFT JOIN pending_resources p
         ON p.id = ? AND p.workspace_id = ? AND p.state = 'uploaded' AND p.expires_at > ?
-      LEFT JOIN memos m ON m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0`,
+      LEFT JOIN memos m ON m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0
+      LEFT JOIN memo_contents mc ON mc.memo_id = m.id AND instr(mc.content_markdown, '\`\`\`edgeever-encrypted-note') = 0`,
     ).bind(id, now, now, id, auth.workspaceId, now, memoId, auth.workspaceId),
     db.prepare("DELETE FROM pending_resources WHERE id = ? AND workspace_id = ?").bind(id, auth.workspaceId),
     auditStatement(db, actor.actorType, actor.actorId, "resource.bind", "resource", id, { memoId }),

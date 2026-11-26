@@ -1,9 +1,26 @@
+import { hasEncryptedNoteMarker, parseEncryptedNoteEnvelope } from "./e2ee";
+
 export const isSuspiciousMemoOverwrite = (
   currentTitle: string | null,
   currentContentText: string,
   nextTitle: string | null,
-  nextContentText: string
+  nextContentText: string,
+  options?: {
+    currentContentMarkdown?: string | null;
+    nextContentMarkdown?: string | null;
+  },
 ) => {
+  const currentEncrypted = hasEncryptedNoteMarker(options?.currentContentMarkdown);
+  const nextHasEncryptedMarker = hasEncryptedNoteMarker(options?.nextContentMarkdown);
+  const nextValidEncrypted = nextHasEncryptedMarker
+    ? parseEncryptedNoteEnvelope(options?.nextContentMarkdown) !== null
+    : false;
+
+  // Allow valid plaintext <-> encrypted transitions and valid encrypted envelope updates.
+  if (nextValidEncrypted || (currentEncrypted && !nextHasEncryptedMarker)) {
+    return false;
+  }
+
   const currentLength = currentContentText.trim().length;
   const nextLength = nextContentText.trim().length;
   const titleChanged = (currentTitle ?? "").trim() !== (nextTitle ?? "").trim();

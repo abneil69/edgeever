@@ -103,7 +103,11 @@ export const registerNotebookShareRoutes = (app: Hono<AppEnv>) => {
     const limit = pageSize(c.req.query("limit"));
     const query = c.req.query("q")?.trim() ?? "";
     const excludedSql = "EXISTS (SELECT 1 FROM notebook_share_excluded_memos e WHERE e.share_id = t.share_id AND e.memo_id = m.id)";
-    const conditions = ["m.is_deleted = 0", "m.id > ?"];
+    const conditions = [
+      "m.is_deleted = 0",
+      "m.id > ?",
+      "NOT EXISTS (SELECT 1 FROM memo_contents emc WHERE emc.memo_id = m.id AND instr(emc.content_markdown, '\`\`\`edgeever-encrypted-note') > 0)",
+    ];
     const binds: unknown[] = [share.token, c.req.query("cursor") ?? ""];
     if (visibility !== "all") conditions.push(`${visibility === "public" ? "NOT " : ""}${excludedSql}`);
     if (query) {
@@ -193,6 +197,12 @@ export const registerNotebookShareRoutes = (app: Hono<AppEnv>) => {
       if (!target) return notFound(c, "Note not found in this notebook share");
       await db.prepare("INSERT OR IGNORE INTO notebook_share_excluded_memos (share_id, memo_id) VALUES (?, ?)").bind(share.id, memoId).run();
     } else {
+      const target = await db.prepare(
+        `SELECT content_markdown FROM memo_contents WHERE memo_id = ?`,
+      ).bind(memoId).first<{ content_markdown: string }>();
+      if (target && target.content_markdown.includes("\`\`\`edgeever-encrypted-note")) {
+        return apiError(c, "encrypted_memo_share_forbidden", "Encrypted notes cannot be published to a public notebook site.", 409);
+      }
       await db.prepare("DELETE FROM notebook_share_excluded_memos WHERE share_id = ? AND memo_id = ?").bind(share.id, memoId).run();
     }
     c.header("Cache-Control", "private, no-store");

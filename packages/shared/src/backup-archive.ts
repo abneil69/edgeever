@@ -1,4 +1,6 @@
 import { EDGEEVER_ZIP_FORMAT, EDGEEVER_ZIP_FORMAT_VERSION, JsonBackupManifestSchema, JsonBackupAiPromptSchema, JsonBackupMemoSchema, JsonBackupNotebookSchema, type JsonBackupManifest, type JsonBackupAiPrompt, type JsonBackupMemo, type JsonBackupNotebook, type JsonBackupResource, type JsonBackupRevision } from "./backup";
+import { hasEncryptedNoteMarker, parseEncryptedNoteEnvelope, type WorkspaceE2eeKeyring } from "./e2ee";
+import { WorkspaceE2eeKeyringSchema } from "./schemas";
 import type { MemoDetail, Notebook, Resource } from "./types";
 import { Reader, ZipReader, ZipWriter, Uint8ArrayReader, type CreateReadableOptions } from "@zip.js/zip.js/index-native.js";
 import { buildNoteMarkdown, buildNotebookExportPaths, getExportResourceExtension, replaceExportResourceUrl, sanitizeExportPathSegment, uniqueExportName } from "./backup-markdown";
@@ -51,6 +53,7 @@ export type JsonBackupSource = {
   getResourceResponse?: (resourceUrl: string) => Promise<Response>;
   getResourceBlob?: (resourceUrl: string) => Promise<Blob>;
   listPrompts: () => Promise<{ prompts: JsonBackupAiPrompt[] }>;
+  getE2eeKeyring?: () => Promise<{ e2eeKeyring: WorkspaceE2eeKeyring | null }>;
 };
 
 type JsonResourceRestoreSink = {
@@ -67,6 +70,7 @@ type JsonRestoreTarget = {
     metadata: JsonBackupResource,
   ) => Promise<JsonResourceRestoreSink>;
   restorePrompts: (prompts: JsonBackupAiPrompt[]) => Promise<unknown>;
+  restoreE2eeKeyring?: (keyring: WorkspaceE2eeKeyring) => Promise<unknown>;
 };
 
 export type ParsedEdgeEverZip = {
@@ -74,6 +78,7 @@ export type ParsedEdgeEverZip = {
   notebooks: JsonBackupNotebook[];
   memos: JsonBackupMemo[];
   prompts: JsonBackupAiPrompt[];
+  e2eeKeyring?: WorkspaceE2eeKeyring | null;
   archive: Blob;
 };
 
@@ -99,7 +104,12 @@ export const createEdgeEverZipStream = async (
   version: { edgeeverVersion: string; buildId: string },
   onProgress?: (progress: EdgeEverZipProgress) => void,
 ) => {
-  const [{ notebooks }, { prompts }] = await Promise.all([source.listNotebooks(), source.listPrompts()]);
+  const [{ notebooks }, { prompts }, keyringResult] = await Promise.all([
+    source.listNotebooks(),
+    source.listPrompts(),
+    source.getE2eeKeyring ? source.getE2eeKeyring() : Promise.resolve({ e2eeKeyring: null }),
+  ]);
+  const e2eeKeyring = keyringResult?.e2eeKeyring ?? null;
   const output = new TransformStream<Uint8Array, Uint8Array>();
   const reader = output.readable.getReader();
   const abort = new AbortController();
@@ -127,6 +137,9 @@ export const createEdgeEverZipStream = async (
       const backupNotebooks = notebooks.map(toBackupNotebook);
       await addJson("notebooks.json", backupNotebooks);
       await addJson("prompts.json", prompts);
+      if (e2eeKeyring) {
+        await addJson("e2ee-keyring.json", e2eeKeyring);
+      }
       let offset = 0;
       let cursor: string | undefined;
       let completed = 0;
@@ -266,6 +279,7 @@ const MAX_RESTORED_IMAGE_BYTES = 100 * 1024 * 1024;
 const isStructuredZipEntry = (path: string) => path === "manifest.json"
   || path === "notebooks.json"
   || path === "prompts.json"
+  || path === "e2ee-keyring.json"
   || /^memos\/[^/]+\.json$/.test(path);
 
 const concatZipChunks = (chunks: Uint8Array[], total: number) => {
@@ -398,6 +412,16 @@ export const parseEdgeEverZip = async (
     throw new EdgeEverZipImportError("invalidData", promptsResult.error);
   }
   const prompts = promptsResult.data as JsonBackupAiPrompt[];
+  let e2eeKeyring: WorkspaceE2eeKeyring | null = null;
+  if (structuredEntries.has("e2ee-keyring.json")) {
+    const keyringResult = WorkspaceE2eeKeyringSchema.safeParse(
+      parseJsonEntry(structuredEntries, "e2ee-keyring.json"),
+    );
+    if (!keyringResult.success) {
+      throw new EdgeEverZipImportError("invalidData", keyringResult.error);
+    }
+    e2eeKeyring = keyringResult.data;
+  }
   const memoPaths = [...structuredEntries.keys()].filter((path) => /^memos\/[^/]+\.json$/.test(path)).sort();
   const memos: JsonBackupMemo[] = [];
   for (const path of memoPaths) {
@@ -442,7 +466,7 @@ export const parseEdgeEverZip = async (
     throw new EdgeEverZipImportError("incompleteResources");
   }
 
-  return { manifest, notebooks, memos, prompts, archive: blob };
+  return { manifest, notebooks, memos, prompts, e2eeKeyring, archive: blob };
 };
 
 /** The new desktop path validates relationships before any target write. */
@@ -462,10 +486,22 @@ export const validateBackupRelationships = (backup: ParsedEdgeEverZip) => {
       parent = notebooks.get(parent)!.parentId;
     }
   }
+  const keyring = backup.e2eeKeyring ?? null;
   for (const item of backup.memos) {
     if (!notebooks.has(item.memo.notebookId)) invalid();
+    if (hasEncryptedNoteMarker(item.memo.contentMarkdown)) {
+      const envelope = parseEncryptedNoteEnvelope(item.memo.contentMarkdown);
+      if (!envelope) invalid();
+      if (item.resources.length > 0) invalid();
+      if (keyring && envelope!.keyId !== keyring.keyId) invalid();
+    }
     for (const revision of item.revisions) {
       if (revision.memoId !== item.memo.id || revisions.has(revision.id)) invalid();
+      if (hasEncryptedNoteMarker(revision.contentMarkdown)) {
+        const revEnvelope = parseEncryptedNoteEnvelope(revision.contentMarkdown);
+        if (!revEnvelope) invalid();
+        if (keyring && revEnvelope!.keyId !== keyring.keyId) invalid();
+      }
       revisions.add(revision.id);
     }
     for (const resource of item.resources) {
@@ -499,6 +535,10 @@ export const restoreEdgeEverZip = async (
     await target.restoreNotebooks(batch);
     completed += batch.length;
     onProgress?.({ completed, total });
+  }
+
+  if (backup.e2eeKeyring && target.restoreE2eeKeyring) {
+    await target.restoreE2eeKeyring(backup.e2eeKeyring);
   }
 
   for (let index = 0; index < backup.memos.length; index += 10) {

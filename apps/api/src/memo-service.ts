@@ -1,4 +1,12 @@
-import { hasPosterDocumentMarker, parsePosterDocument } from "@edgeever/shared";
+import {
+  hasDiagramDocumentMarker,
+  hasEncryptedNoteMarker,
+  hasInfographicDocumentMarker,
+  hasPosterDocumentMarker,
+  hasTableDocumentMarker,
+  parseEncryptedNoteEnvelope,
+  parsePosterDocument,
+} from "@edgeever/shared";
 import {
   createExcerpt,
   DEFAULT_MEMO_TITLE,
@@ -301,7 +309,9 @@ export const searchMemoSummaries = async (
            )
            SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
                   m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-                  c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
+                  c.content_text,
+                  (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
+                  (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
            FROM search_matches s
            INNER JOIN memos m ON m.id = s.memo_id
            INNER JOIN memo_contents c ON c.memo_id = m.id
@@ -314,7 +324,7 @@ export const searchMemoSummaries = async (
 
       return rows.results.map(row => {
         const memo = mapMemoSummary(row);
-        const snippet = memoSearchSnippet(row.content_text ?? "", q);
+        const snippet = memo.encrypted ? undefined : memoSearchSnippet(row.content_text ?? "", q);
         return snippet ? { ...memo, snippet } : memo;
       });
     }
@@ -324,7 +334,9 @@ export const searchMemoSummaries = async (
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-              c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
+              c.content_text,
+              (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
+              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE ${filters.join(" AND ")}
@@ -387,7 +399,9 @@ export const listMemosForMcp = async (
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-              c.content_text, (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster
+              c.content_text,
+              (instr(c.content_markdown, '<!-- edgeever-poster-v1:') > 0) AS is_poster,
+              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE m.workspace_id = ? AND ${deletedFilter} AND ${posterFilter} ${accessFilter}
@@ -630,7 +644,8 @@ export const getMemosForBulkAction = async (db: DatabaseAdapter, workspaceId: st
     .prepare(
       `SELECT m.id, m.notebook_id, m.title, m.excerpt, m.tags_json, m.is_pinned,
               m.is_archived, m.is_deleted, m.created_at, m.updated_at, m.deleted_at, c.revision,
-              c.content_text
+              c.content_text,
+              (instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') > 0) AS is_encrypted
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE m.workspace_id = ? AND m.is_deleted = ?
@@ -662,13 +677,13 @@ export const restoreMemosRecord = async (
   const placeholders = uniqueMemoIds.map(() => "?").join(", ");
   const rows = await db
     .prepare(
-      `SELECT m.id, m.notebook_id, m.title, m.tags_json, c.content_text
+      `SELECT m.id, m.notebook_id, m.title, m.tags_json, c.content_text, c.content_markdown
        FROM memos m
        INNER JOIN memo_contents c ON c.memo_id = m.id
        WHERE m.workspace_id = ? AND m.is_deleted = 1 AND m.id IN (${placeholders})`
     )
     .bind(workspaceId, ...uniqueMemoIds)
-    .all<{ id: string; notebook_id: string; title: string | null; tags_json: string; content_text: string }>();
+    .all<{ id: string; notebook_id: string; title: string | null; tags_json: string; content_text: string; content_markdown: string }>();
 
   if (rows.results.length !== uniqueMemoIds.length) {
     throw new AppError("missing_memos", "One or more memos cannot be restored.", 400);
@@ -719,7 +734,13 @@ export const restoreMemosRecord = async (
            WHERE memo_id = ? AND is_deleted = 1`
         )
         .bind(now, row.id),
-      upsertMemoSearchDocumentStatement(db, row.id, row.title, row.content_text, tags.join(" ")),
+      upsertMemoSearchDocumentStatement(
+        db,
+        row.id,
+        row.title,
+        hasEncryptedNoteMarker(row.content_markdown) ? "" : row.content_text,
+        tags.join(" "),
+      ),
       auditStatement(db, actor.actorType, actor.actorId, "memo.restore", "memo", row.id, {
         fromNotebookId: row.notebook_id,
         toNotebookId: restoreNotebookId,
@@ -938,6 +959,13 @@ export const mergeMemosRecord = async (
   const ordered = uniqueMemoIds
     .map((memoId) => rows.results.find((row) => row.id === memoId))
     .filter((row): row is MemoDetailRow => Boolean(row));
+  if (ordered.some((memo) => hasEncryptedNoteMarker(memo.content_markdown))) {
+    throw new AppError(
+      "encrypted_memo_merge_forbidden",
+      "Encrypted notes cannot be merged on the server.",
+      409,
+    );
+  }
   const notebookId = input.notebookId ?? ordered[0].notebook_id;
   const title = resolveMergedMemoTitle(input.title, ordered);
   const sourceDocs = ordered.map((memo) => {
@@ -1038,12 +1066,22 @@ export const createMemoRecord = async (
   }
   const tags = normalizeTags(input.tags);
   const contentMarkdown = input.contentMarkdown ?? "";
-  const contentJson = input.contentJson && typeof input.contentJson === "object"
-    ? input.contentJson as TiptapDoc
-    : markdownToDoc(contentMarkdown);
-  const contentText = docToText(contentJson);
+  const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
+  if (isEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+    throw new AppError(
+      "invalid_encrypted_memo",
+      "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+      400,
+    );
+  }
+  const contentJson = isEncrypted
+    ? emptyDoc()
+    : input.contentJson && typeof input.contentJson === "object"
+      ? input.contentJson as TiptapDoc
+      : markdownToDoc(contentMarkdown);
+  const contentText = isEncrypted ? "" : docToText(contentJson);
   const title = normalizeMemoTitle(input.title);
-  const excerpt = createExcerpt(contentText);
+  const excerpt = isEncrypted ? "" : createExcerpt(contentText);
   const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
   const id = createId("memo");
   const now = isoNow();
@@ -1424,8 +1462,11 @@ export const updateMemoRecord = async (
   }
 
   const currentContentJson = parseDoc(current.content_json);
-  const contentJson =
-    input.contentJson !== undefined
+  const incomingEncryptedMarkdown =
+    input.contentMarkdown !== undefined && hasEncryptedNoteMarker(input.contentMarkdown);
+  const rawContentJson = incomingEncryptedMarkdown
+    ? emptyDoc()
+    : input.contentJson !== undefined
       ? input.contentJson
       : input.contentMarkdown !== undefined
         ? markdownToDoc(input.contentMarkdown)
@@ -1434,14 +1475,70 @@ export const updateMemoRecord = async (
     input.contentMarkdown !== undefined
       ? input.contentMarkdown
       : input.contentJson !== undefined
-        ? docToMarkdown(contentJson)
+        ? docToMarkdown(rawContentJson)
         : current.content_markdown;
-  const contentText = hasDocumentUpdate ? docToText(contentJson) : current.content_text;
+  const currentEncrypted = hasEncryptedNoteMarker(current.content_markdown);
+  const nextEncrypted = hasEncryptedNoteMarker(contentMarkdown);
+  if (nextEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+    return {
+      error: "invalid_encrypted_memo",
+      message: "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+      status: 400,
+    };
+  }
+  const convertingToEncrypted = !currentEncrypted && nextEncrypted;
+  if (convertingToEncrypted) {
+    if (
+      hasPosterDocumentMarker(current.content_markdown)
+      || hasTableDocumentMarker(current.content_markdown)
+      || hasDiagramDocumentMarker(current.content_markdown)
+      || hasInfographicDocumentMarker(current.content_markdown)
+    ) {
+      return {
+        error: "encrypted_memo_structured_forbidden",
+        message: "Structured notes cannot be converted to encrypted notes.",
+        status: 409,
+      };
+    }
+    const existingResource = await db
+      .prepare(`SELECT id FROM resources WHERE memo_id = ? AND is_deleted = 0 LIMIT 1`)
+      .bind(id)
+      .first<{ id: string }>();
+    if (existingResource) {
+      return {
+        error: "encrypted_memo_resources_forbidden",
+        message: "Remove all images and attachments before encrypting this note.",
+        status: 409,
+      };
+    }
+    const pendingUpload = await db
+      .prepare(
+        `SELECT id FROM resource_uploads WHERE memo_id = ? AND workspace_id = ? AND expires_at > ? LIMIT 1`,
+      )
+      .bind(id, workspaceId, now)
+      .first<{ id: string }>();
+    if (pendingUpload) {
+      return {
+        error: "encrypted_memo_resources_forbidden",
+        message: "Finish or cancel pending uploads before encrypting this note.",
+        status: 409,
+      };
+    }
+  }
+  const contentJson = nextEncrypted ? emptyDoc() : rawContentJson;
+  const contentText = nextEncrypted
+    ? ""
+    : hasDocumentUpdate
+      ? docToText(contentJson)
+      : current.content_text;
   const title =
     input.title !== undefined ? normalizeMemoTitle(input.title) : normalizeMemoTitle(current.title);
   if (
     !input.allowDestructiveOverwrite &&
-    isSuspiciousMemoOverwrite(current.title, current.content_text, title, contentText)
+    isSuspiciousMemoOverwrite(current.title, current.content_text, title, contentText, {
+      currentContentMarkdown: current.content_markdown,
+      nextContentMarkdown: contentMarkdown,
+    })
   ) {
     return {
       error: SUSPICIOUS_MEMO_OVERWRITE_ERROR,
@@ -1449,7 +1546,7 @@ export const updateMemoRecord = async (
     };
   }
   const tags = input.tags === undefined ? parseJsonArray(current.tags_json) : normalizeTags(input.tags);
-  const excerpt = createExcerpt(contentText);
+  const excerpt = nextEncrypted ? "" : createExcerpt(contentText);
   const notebookId = input.notebookId ?? current.notebook_id;
   if (hasPosterDocumentMarker(current.content_markdown) && !parsePosterDocument(contentMarkdown)) {
     return { error: "poster_update_required", message: "Poster source must be edited on a supported client.", status: 409 };
@@ -1522,9 +1619,25 @@ export const updateMemoRecord = async (
   }
 
   const nextRevision = current.revision + 1;
-  const revisionStatements = (await shouldSnapshotMemoRevisionService(db, current, title, JSON.stringify(tags), contentHash, updatedAt))
-    ? [createMemoRevisionStatementService(db, current, actorLabel, updatedAt)]
+  const encryptionCleanupStatements: PreparedStatementAdapter[] = convertingToEncrypted
+    ? [
+        db.prepare(`DELETE FROM memo_revisions WHERE memo_id = ?`).bind(id),
+        db.prepare(
+          `DELETE FROM memo_share_slug_claims
+           WHERE workspace_id = ?
+             AND slug IN (
+               SELECT slug FROM memo_shares
+               WHERE workspace_id = ? AND memo_id = ? AND slug IS NOT NULL
+             )`,
+        ).bind(workspaceId, workspaceId, id),
+        db.prepare(`DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id = ?`).bind(workspaceId, id),
+      ]
     : [];
+  const revisionStatements = convertingToEncrypted
+    ? []
+    : (await shouldSnapshotMemoRevisionService(db, current, title, JSON.stringify(tags), contentHash, updatedAt))
+      ? [createMemoRevisionStatementService(db, current, actorLabel, updatedAt)]
+      : [];
   const editSessionStatements = editSession
     ? [
         db.prepare(
@@ -1556,6 +1669,7 @@ export const updateMemoRecord = async (
 
   await db.batch([
     ...(commit?.before ?? []),
+    ...encryptionCleanupStatements,
     ...revisionStatements,
     ...releaseResourceStatements,
     db

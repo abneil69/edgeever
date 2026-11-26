@@ -1,4 +1,4 @@
-import { COMPANION_NOTE_EDIT_MAX_CHARS, explicitDiagramKind, independentDiagramRequest, parseDiagramDocument, parseInfographicDocument, parseTableDocument, type CompanionSource, type CompanionTodo, type CompanionToolCall, type CompanionToolDefinition, type CompanionTurnInput, type MemoDetail, type MemoSummary } from "@edgeever/shared";
+import { COMPANION_NOTE_EDIT_MAX_CHARS, explicitDiagramKind, hasEncryptedNoteMarker, independentDiagramRequest, parseDiagramDocument, parseInfographicDocument, parseTableDocument, type CompanionSource, type CompanionTodo, type CompanionToolCall, type CompanionToolDefinition, type CompanionTurnInput, type MemoDetail, type MemoSummary } from "@edgeever/shared";
 import type { DatabaseAdapter } from "./storage-contract";
 import type { AppContext } from "./api-context";
 import type { CompanionScope } from "./companion-service";
@@ -339,8 +339,37 @@ export function createCompanionTools(args: { db: DatabaseAdapter; scope: Compani
           return done(await proposeCompanionToolAction(args.db, args.scope, args.input.id,
             definition.name, parameters_, typeof _reason === "string" ? _reason : definition.title, session.cursor ?? current, inspected));
         }
+        if (definition.name === "get_memo") {
+          const existing = await getMemoDetail(
+            args.db,
+            args.scope.workspaceId,
+            String(parameters_.memoId),
+            parameters_.includeDeleted === true,
+          );
+          if (existing && (existing.encrypted || hasEncryptedNoteMarker(existing.contentMarkdown))) {
+            remember(existing);
+            return done({
+              id: existing.id,
+              title: existing.title,
+              notebookId: existing.notebookId,
+              tags: existing.tags,
+              revision: existing.revision,
+              createdAt: existing.createdAt,
+              updatedAt: existing.updatedAt,
+              encrypted: true,
+              content: "",
+              message: "This note is end-to-end encrypted. Its body cannot be read or modified by the companion.",
+            });
+          }
+        }
         if (definition.name === "update_memo" && parameters_.dryRun !== true && typeof parameters_.contentMarkdown === "string") {
           const memo = await getMemoDetail(args.db, args.scope.workspaceId, String(parameters_.memoId));
+          if (memo && (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown))) {
+            throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be modified by the companion.", 409);
+          }
+          if (hasEncryptedNoteMarker(parameters_.contentMarkdown)) {
+            throw new AppError("encrypted_memo_forbidden", "Encrypted note envelopes cannot be written by the companion.", 409);
+          }
           if (!memo || inspected.get(memo.id) !== memo.revision) {
             throw new AppError("companion_action_unread", "Read the complete source notes before changing their content.", 400);
           }
@@ -360,6 +389,13 @@ export function createCompanionTools(args: { db: DatabaseAdapter; scope: Compani
         }
         if (autoApply && parameters_.dryRun !== true && (definition.name === "update_memo" || definition.name === "update_diagram" || definition.name === "update_poster" || definition.name === "restore_memo_revision")) {
           const memo = await getMemoDetail(args.db, args.scope.workspaceId, String(parameters_.memoId));
+          if (
+            memo
+            && (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown))
+            && (definition.name !== "update_memo" || typeof parameters_.contentMarkdown === "string")
+          ) {
+            throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be modified by the companion.", 409);
+          }
           if (!memo || inspected.get(memo.id) !== memo.revision || (definition.name === "update_poster" && posterReads.get(memo.id) !== memo.revision)) {
             throw new AppError("companion_action_unread",
               definition.name === "update_diagram"
@@ -520,10 +556,11 @@ export function createCompanionTools(args: { db: DatabaseAdapter; scope: Compani
               notebookName: await notebookName(memo.notebookId),
               tags: memo.tags,
               poster: memo.poster,
+              ...(memo.encrypted ? { encrypted: true } : {}),
               createdAt: memo.createdAt,
               updatedAt: memo.updatedAt,
-              excerpt: takeNoteText(memo.excerpt, 180),
-              ...(memo.snippet ? { snippet: memo.snippet } : {}),
+              excerpt: memo.encrypted ? "" : takeNoteText(memo.excerpt, 180),
+              ...(memo.snippet && !memo.encrypted ? { snippet: memo.snippet } : {}),
             }))),
           });
         }

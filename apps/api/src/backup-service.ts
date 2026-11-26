@@ -4,10 +4,15 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
+  hasEncryptedNoteMarker,
   normalizeTags,
+  parseEncryptedNoteEnvelope,
+  WORKSPACE_E2EE_KDF_ALGORITHM,
+  WorkspaceE2eeKeyringSchema,
   type JsonBackupMemo,
   type JsonBackupNotebook,
   type TiptapDoc,
+  type WorkspaceE2eeKeyring,
 } from "@edgeever/shared";
 import { AppError } from "./app-error";
 import { audit } from "./audit";
@@ -112,6 +117,144 @@ export const restoreJsonNotebooks = async (
   )));
 };
 
+type WorkspaceE2eeKeyringRow = {
+  workspace_id: string;
+  key_id: string;
+  revision: number;
+  kdf_algorithm: string;
+  kdf_salt: string;
+  kdf_iterations: number;
+  wrapped_master_key: string;
+  master_key_iv: string;
+  created_at: string;
+  updated_at: string;
+};
+
+const mapKeyringRow = (row: WorkspaceE2eeKeyringRow): WorkspaceE2eeKeyring => ({
+  keyId: row.key_id,
+  revision: row.revision,
+  kdfAlgorithm: row.kdf_algorithm as typeof WORKSPACE_E2EE_KDF_ALGORITHM,
+  kdfSalt: row.kdf_salt,
+  kdfIterations: row.kdf_iterations,
+  wrappedMasterKey: row.wrapped_master_key,
+  masterKeyIv: row.master_key_iv,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+const readWorkspaceKeyringRow = (db: DatabaseAdapter, workspaceId: string) =>
+  db
+    .prepare(
+      `SELECT workspace_id, key_id, revision, kdf_algorithm, kdf_salt, kdf_iterations,
+              wrapped_master_key, master_key_iv, created_at, updated_at
+       FROM workspace_e2ee_keyrings
+       WHERE workspace_id = ?`,
+    )
+    .bind(workspaceId)
+    .first<WorkspaceE2eeKeyringRow>();
+
+export const restoreJsonE2eeKeyring = async (
+  db: DatabaseAdapter,
+  workspaceId: string,
+  input: WorkspaceE2eeKeyring,
+): Promise<WorkspaceE2eeKeyring> => {
+  const keyring = WorkspaceE2eeKeyringSchema.parse(input);
+  let existing = await readWorkspaceKeyringRow(db, workspaceId);
+
+  if (!existing) {
+    const inserted = await db
+      .prepare(
+        `INSERT OR IGNORE INTO workspace_e2ee_keyrings (
+           workspace_id, key_id, revision, kdf_algorithm, kdf_salt, kdf_iterations,
+           wrapped_master_key, master_key_iv, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        workspaceId,
+        keyring.keyId,
+        keyring.revision,
+        keyring.kdfAlgorithm,
+        keyring.kdfSalt,
+        keyring.kdfIterations,
+        keyring.wrappedMasterKey,
+        keyring.masterKeyIv,
+        keyring.createdAt,
+        keyring.updatedAt,
+      )
+      .run();
+
+    if (Number(inserted.meta.changes) === 1) {
+      await audit(db, "user", null, "backup.restore_e2ee_keyring", "workspace", workspaceId, {
+        keyId: keyring.keyId,
+        revision: keyring.revision,
+        mode: "insert",
+      });
+      const created = await readWorkspaceKeyringRow(db, workspaceId);
+      if (!created) {
+        throw new Error("Restored encryption keyring could not be read.");
+      }
+      return mapKeyringRow(created);
+    }
+
+    existing = await readWorkspaceKeyringRow(db, workspaceId);
+    if (!existing) {
+      throw new Error("Workspace encryption keyring restore failed.");
+    }
+  }
+
+  if (existing.key_id !== keyring.keyId) {
+    throw new AppError(
+      "keyring_key_id_mismatch",
+      "Target workspace already has an encryption keyring with a different keyId.",
+      409,
+    );
+  }
+
+  if (keyring.revision > existing.revision) {
+    const updated = await db
+      .prepare(
+        `UPDATE workspace_e2ee_keyrings
+         SET revision = ?, kdf_algorithm = ?, kdf_salt = ?, kdf_iterations = ?,
+             wrapped_master_key = ?, master_key_iv = ?, updated_at = ?
+         WHERE workspace_id = ? AND key_id = ? AND revision < ?`,
+      )
+      .bind(
+        keyring.revision,
+        keyring.kdfAlgorithm,
+        keyring.kdfSalt,
+        keyring.kdfIterations,
+        keyring.wrappedMasterKey,
+        keyring.masterKeyIv,
+        keyring.updatedAt,
+        workspaceId,
+        keyring.keyId,
+        keyring.revision,
+      )
+      .run();
+
+    if (Number(updated.meta.changes) === 1) {
+      await audit(db, "user", null, "backup.restore_e2ee_keyring", "workspace", workspaceId, {
+        keyId: keyring.keyId,
+        revision: keyring.revision,
+        mode: "upgrade",
+      });
+    }
+  }
+
+  const latest = await readWorkspaceKeyringRow(db, workspaceId);
+  if (!latest) {
+    throw new Error("Workspace encryption keyring could not be read after restore.");
+  }
+  if (latest.key_id !== keyring.keyId) {
+    throw new AppError(
+      "keyring_key_id_mismatch",
+      "Target workspace already has an encryption keyring with a different keyId.",
+      409,
+    );
+  }
+  return mapKeyringRow(latest);
+};
+
 export const restoreJsonMemos = async (
   db: DatabaseAdapter,
   workspaceId: string,
@@ -123,6 +266,79 @@ export const restoreJsonMemos = async (
   // the notes before it restored.
   if (backups.some((backup) => backup.revisions.some((revision) => revision.memoId !== backup.memo.id))) {
     throw new AppError("invalid_backup", "A backup revision belongs to a different memo.", 400);
+  }
+
+  const targetKeyring = await readWorkspaceKeyringRow(db, workspaceId);
+  const encryptedMemoIds: string[] = [];
+  for (const backup of backups) {
+    const parsedJson = parseBackupDoc(backup.memo.contentJson);
+    const contentMarkdown = backup.memo.contentMarkdown || docToMarkdown(parsedJson);
+    if (hasEncryptedNoteMarker(contentMarkdown)) {
+      const envelope = parseEncryptedNoteEnvelope(contentMarkdown);
+      if (!envelope) {
+        throw new AppError(
+          "invalid_encrypted_memo",
+          "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+          400,
+        );
+      }
+      if (backup.resources.length > 0) {
+        throw new AppError(
+          "encrypted_memo_resources_forbidden",
+          "Encrypted notes cannot be restored with images or attachments.",
+          409,
+        );
+      }
+      if (targetKeyring && envelope.keyId !== targetKeyring.key_id) {
+        throw new AppError(
+          "keyring_key_id_mismatch",
+          "Encrypted note keyId does not match the target workspace encryption keyring.",
+          409,
+        );
+      }
+      encryptedMemoIds.push(backup.memo.id);
+    }
+
+    for (const revision of backup.revisions) {
+      const parsedRevJson = parseBackupDoc(revision.contentJson);
+      const revMarkdown = revision.contentMarkdown || docToMarkdown(parsedRevJson);
+      if (hasEncryptedNoteMarker(revMarkdown)) {
+        const revEnvelope = parseEncryptedNoteEnvelope(revMarkdown);
+        if (!revEnvelope) {
+          throw new AppError(
+            "invalid_encrypted_memo",
+            "Encrypted note revision contains an invalid envelope.",
+            400,
+          );
+        }
+        if (targetKeyring && revEnvelope.keyId !== targetKeyring.key_id) {
+          throw new AppError(
+            "keyring_key_id_mismatch",
+            "Encrypted note revision keyId does not match the target workspace encryption keyring.",
+            409,
+          );
+        }
+      }
+    }
+  }
+
+  if (encryptedMemoIds.length > 0) {
+    const placeholders = encryptedMemoIds.map(() => "?").join(", ");
+    const existingResource = await db
+      .prepare(
+        `SELECT memo_id FROM resources
+         WHERE is_deleted = 0 AND memo_id IN (${placeholders})
+         LIMIT 1`,
+      )
+      .bind(...encryptedMemoIds)
+      .first<{ memo_id: string }>();
+    if (existingResource) {
+      throw new AppError(
+        "encrypted_memo_resources_forbidden",
+        "Encrypted notes cannot be restored over a note with existing attachments.",
+        409,
+      );
+    }
   }
 
   const revisionOwners = new Map<string, string>();
@@ -145,9 +361,19 @@ export const restoreJsonMemos = async (
 
   for (const backup of backups) {
     const memo = backup.memo;
-    const contentJson = parseBackupDoc(memo.contentJson);
-    const contentMarkdown = memo.contentMarkdown || docToMarkdown(contentJson);
-    const contentText = docToText(contentJson);
+    const parsedJson = parseBackupDoc(memo.contentJson);
+    const contentMarkdown = memo.contentMarkdown || docToMarkdown(parsedJson);
+    const isEncrypted = hasEncryptedNoteMarker(contentMarkdown);
+    if (isEncrypted && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+      throw new AppError(
+        "invalid_encrypted_memo",
+        "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+        400,
+      );
+    }
+    const contentJson = isEncrypted ? emptyDoc() : parsedJson;
+    const contentText = isEncrypted ? "" : docToText(contentJson);
+    const excerpt = isEncrypted ? "" : createExcerpt(contentText);
     const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
     const title = normalizeMemoTitle(memo.title);
     const tags = normalizeTags(memo.tags);
@@ -178,7 +404,7 @@ export const restoreJsonMemos = async (
         workspaceId,
         memo.notebookId,
         title,
-        createExcerpt(contentText),
+        excerpt,
         JSON.stringify(tags),
         memo.isPinned ? 1 : 0,
         memo.isArchived ? 1 : 0,
@@ -210,13 +436,28 @@ export const restoreJsonMemos = async (
       ),
       upsertMemoSearchDocumentStatement(db, memo.id, title, contentText, tags.join(" ")),
       db.prepare("DELETE FROM memo_revisions WHERE memo_id = ?").bind(memo.id),
+      ...(isEncrypted
+        ? [
+            db.prepare(
+              `DELETE FROM memo_share_slug_claims
+               WHERE workspace_id = ?
+                 AND slug IN (
+                   SELECT slug FROM memo_shares
+                   WHERE workspace_id = ? AND memo_id = ? AND slug IS NOT NULL
+                 )`,
+            ).bind(workspaceId, workspaceId, memo.id),
+            db.prepare("DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id = ?").bind(workspaceId, memo.id),
+          ]
+        : []),
     ]);
 
     for (let index = 0; index < backup.revisions.length; index += 50) {
       const statements = backup.revisions.slice(index, index + 50).map((revision) => {
-        const revisionJson = parseBackupDoc(revision.contentJson);
-        const revisionMarkdown = revision.contentMarkdown || docToMarkdown(revisionJson);
-        const revisionText = docToText(revisionJson);
+        const parsedRevisionJson = parseBackupDoc(revision.contentJson);
+        const revisionMarkdown = revision.contentMarkdown || docToMarkdown(parsedRevisionJson);
+        const revisionEncrypted = hasEncryptedNoteMarker(revisionMarkdown);
+        const revisionJson = revisionEncrypted ? emptyDoc() : parsedRevisionJson;
+        const revisionText = revisionEncrypted ? "" : docToText(revisionJson);
         return db.prepare(
           `INSERT INTO memo_revisions (
             id, memo_id, revision, title, content_json, content_markdown,

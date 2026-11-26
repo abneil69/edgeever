@@ -11,6 +11,7 @@ import { createId, isoNow } from "./entity-utils";
 import { resolveObjectStorage } from "./object-storage";
 import {
   SUPPORTED_IMAGE_MIME_TYPES,
+  assertMemoNotEncryptedForResources,
   getResourceRow,
   inferImageExtension,
   mapResource,
@@ -118,6 +119,7 @@ export const initiateResourceUpload = async (
   const uploadId = createId("upload");
   const resourceId = createId("res");
   const workspaceId = getWorkspaceId(context);
+  await assertMemoNotEncryptedForResources(context.env.storage.db, workspaceId, input.memoId);
   const filename = normalizeFilename(input.filename) || resourceId;
   const extension = kind === "image" ? inferImageExtension(filename, input.mimeType) : "";
   const objectKey = `workspaces/${workspaceId}/memos/${input.memoId}/${resourceId}${extension}`;
@@ -196,6 +198,7 @@ export const initiateResourceRestoreUpload = async (
   if (!memo) {
     throw new AppError("not_found", "Restore target memo not found.", 404);
   }
+  await assertMemoNotEncryptedForResources(context.env.storage.db, workspaceId, metadata.memoId);
   const foreignResource = await context.env.storage.db.prepare(
     `SELECT r.id FROM resources r INNER JOIN memos m ON m.id = r.memo_id
      WHERE r.id = ? AND m.workspace_id <> ? LIMIT 1`,
@@ -442,6 +445,7 @@ export const completeResourceUpload = async (
 
   // Revalidate sessions persisted by an older server before assembling any bytes.
   const restoredMetadata = upload.restore_metadata_json ? parseRestoredResourceMetadata(upload) : null;
+  await assertMemoNotEncryptedForResources(context.env.storage.db, upload.workspace_id, upload.memo_id);
   const destination = await resolveObjectStorage(context.env, upload.storage_config_id);
   const multipart = destination.store.resumeMultipartUpload(upload.object_key, upload.provider_upload_id);
   await multipart.complete(parts);

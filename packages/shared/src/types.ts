@@ -39,6 +39,7 @@ export type MemoSummary = {
   infographic?: boolean;
   poster?: boolean;
   videoNote?: boolean;
+  encrypted?: boolean;
   tags: string[];
   isPinned: boolean;
   isArchived: boolean;

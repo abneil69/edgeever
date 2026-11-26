@@ -50,6 +50,7 @@ import { createCloudflareStorageAdapter } from "./cloudflare-storage-adapter";
 import { createCloudflarePosterRenderEvents } from "./cloudflare-poster-render-events";
 import { posterRenderEventsApp } from "./poster-render-events-route";
 import {
+  restoreJsonE2eeKeyring as restoreJsonE2eeKeyringService,
   restoreJsonMemos as restoreJsonMemosService,
   restoreJsonNotebooks as restoreJsonNotebooksService,
 } from "./backup-service";
@@ -85,6 +86,7 @@ import { registerTemplateRoutes } from "./template-routes";
 import { registerAuthRoutes } from "./auth-routes";
 import { registerApiTokenRoutes } from "./api-token-routes";
 import { registerObjectStorageRoutes } from "./object-storage-routes";
+import { registerE2eeKeyringRoutes } from "./e2ee-keyring-routes";
 import { registerAiRoutes } from "./ai-routes";
 import { registerPluginCapabilityRoutes } from "./plugin-capability-routes";
 import { registerCompanionRoutes } from "./companion-routes";
@@ -352,6 +354,9 @@ registerImportContextGuard(app);
 registerObjectStorageRoutes(app, {
   isDemoMode: (...args) => isDemoMode(...args),
 });
+registerE2eeKeyringRoutes(app, {
+  isDemoMode: (...args) => isDemoMode(...args),
+});
 registerAiRoutes(app, {
   isDemoMode: (...args) => isDemoMode(...args),
 });
@@ -411,6 +416,8 @@ registerBackupRoutes(app, {
   mapMemoDetail: (...args) => mapMemoDetail(...args),
   restoreJsonMemos: restoreJsonMemosService,
   restoreJsonNotebooks: restoreJsonNotebooksService,
+  restoreJsonE2eeKeyring: restoreJsonE2eeKeyringService,
+  isDemoMode: (...args) => isDemoMode(...args),
   sha256Bytes,
   initiateResourceRestoreUpload: (...args) => initiateResourceRestoreUpload(...args),
 });

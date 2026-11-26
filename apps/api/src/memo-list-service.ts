@@ -7,6 +7,7 @@ import {
   getInfographicSummary,
   getPosterSummary,
   getTableSummary,
+  hasEncryptedNoteMarker,
   type MemoSummary,
 } from "@edgeever/shared";
 import { clampNumber, parseJsonArray } from "./entity-utils";
@@ -24,6 +25,7 @@ export type MemoSummaryRow = {
   excerpt: string;
   content_text?: string | null;
   is_poster?: number;
+  is_encrypted?: number;
   content_markdown?: string | null;
   tags_json: string;
   is_pinned: number;
@@ -72,28 +74,36 @@ export type ListMemosResult = {
 const DEFAULT_MEMO_LIST_LIMIT = 100;
 const MAX_MEMO_LIST_LIMIT = 200;
 
-export const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => ({
-  id: row.id,
-  notebookId: row.notebook_id,
-  title: row.title,
-  excerpt:
-    row.excerpt ||
-    createExcerpt(row.content_text ?? "") ||
-    createExcerpt(docToText(markdownToDoc(row.content_markdown ?? ""))),
-  ...getDiagramSummary(row.content_markdown),
-  ...getInfographicSummary(row.content_markdown),
-  ...getPosterSummary(row.content_markdown),
-  ...(row.is_poster !== undefined ? { poster: Boolean(row.is_poster) } : {}),
-  ...getTableSummary(row.content_markdown),
-  tags: parseJsonArray(row.tags_json),
-  isPinned: Boolean(row.is_pinned),
-  isArchived: Boolean(row.is_archived),
-  isDeleted: Boolean(row.is_deleted),
-  revision: row.revision,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at,
-  deletedAt: row.deleted_at,
-});
+export const mapMemoSummary = (row: MemoSummaryRow): MemoSummary => {
+  const encrypted = row.is_encrypted !== undefined
+    ? Boolean(row.is_encrypted)
+    : hasEncryptedNoteMarker(row.content_markdown);
+
+  return {
+    id: row.id,
+    notebookId: row.notebook_id,
+    title: row.title,
+    excerpt: encrypted
+      ? ""
+      : row.excerpt ||
+        createExcerpt(row.content_text ?? "") ||
+        createExcerpt(docToText(markdownToDoc(row.content_markdown ?? ""))),
+    ...getDiagramSummary(row.content_markdown),
+    ...getInfographicSummary(row.content_markdown),
+    ...getPosterSummary(row.content_markdown),
+    ...(row.is_poster !== undefined ? { poster: Boolean(row.is_poster) } : {}),
+    ...getTableSummary(row.content_markdown),
+    ...(encrypted ? { encrypted: true } : {}),
+    tags: parseJsonArray(row.tags_json),
+    isPinned: Boolean(row.is_pinned),
+    isArchived: Boolean(row.is_archived),
+    isDeleted: Boolean(row.is_deleted),
+    revision: row.revision,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    deletedAt: row.deleted_at,
+  };
+};
 
 const normalizeMemoTitle = (value: string | null | undefined) => {
   const title = value?.trim();

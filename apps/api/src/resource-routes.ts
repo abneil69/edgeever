@@ -1,4 +1,5 @@
 import {
+  hasEncryptedNoteMarker,
   parseResourceThumbnailWidth,
   resolveResourceUploadMimeType,
   ResourceUpdateSchema,
@@ -230,6 +231,14 @@ export const registerResourceRoutes = (
       memoId,
     );
     if (!memo) return notFound(context, "Memo not found");
+    if (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)) {
+      return apiError(
+        context,
+        "encrypted_memo_resources_forbidden",
+        "Images and attachments cannot be attached to an encrypted note.",
+        409,
+      );
+    }
     try {
       await assertResourceMemoAccess(
         context,
@@ -286,6 +295,14 @@ export const registerResourceRoutes = (
       memoId,
     );
     if (!memo) return notFound(context, "Memo not found");
+    if (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)) {
+      return apiError(
+        context,
+        "encrypted_memo_resources_forbidden",
+        "Images and attachments cannot be attached to an encrypted note.",
+        409,
+      );
+    }
     try {
       await assertResourceMemoAccess(
         context,

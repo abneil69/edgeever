@@ -1,6 +1,6 @@
 import { learnCompanionPreferences, refreshCompanionPreferences, applicableMemories } from "./companion-learning";
 import { selectCompanionMemories } from "./companion-memory-context";
-import { CompanionDiscoveryOutputSchema, companionTurnLocale, type CompanionDiscoveryOutput, type CompanionDiscoveryItem, type CompanionDiscoverySettings,
+import { CompanionDiscoveryOutputSchema, companionTurnLocale, hasEncryptedNoteMarker, type CompanionDiscoveryOutput, type CompanionDiscoveryItem, type CompanionDiscoverySettings,
   type CompanionDiscoverySettingsInput, type MemoDetail } from "@edgeever/shared";
 import type { DatabaseAdapter } from "./storage-contract";
 import type { CompanionScope } from "./companion-service";
@@ -89,7 +89,8 @@ export async function listDiscoveries(db: DatabaseAdapter, scope: CompanionScope
       let valid = true;
       for (const source of sources) {
         const memo = await db.prepare(`SELECT m.notebook_id, c.revision FROM memos m JOIN memo_contents c ON c.memo_id = m.id
-          WHERE m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0`).bind(source.id, scope.workspaceId)
+          WHERE m.id = ? AND m.workspace_id = ? AND m.is_deleted = 0
+            AND instr(c.content_markdown, '\`\`\`edgeever-encrypted-note') = 0`).bind(source.id, scope.workspaceId)
           .first<{ notebook_id: string; revision: number }>();
         if (!memo || memo.revision !== source.revision || memo.notebook_id !== source.notebookId) { valid = false; break; }
       }
@@ -120,19 +121,22 @@ async function candidatesFor(db: DatabaseAdapter, scope: CompanionScope) {
   // Permission covers the entire current workspace, including new/child
   // notebooks. Retrieval budgets are global, never multiplied by notebook count.
   const recent = (await searchMemoSummaries(db, { workspaceId: scope.workspaceId, limit: 12 }))
+    .filter(note => !note.encrypted)
     .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   const anchor = recent[0];
   if (!anchor || Date.parse(anchor.updatedAt) < Date.now() - 14 * 86400000) return [];
   const segmenter = new Intl.Segmenter("zh", { granularity: "word" });
   const terms = [...new Set([...segmenter.segment(anchor.title || anchor.excerpt)]
     .filter(part => part.isWordLike && part.segment.length >= 2).map(part => part.segment))].slice(0, 3);
-  const related = (await Promise.all(terms.map(query => searchMemoSummaries(db, { workspaceId: scope.workspaceId, query, limit: 4 })))).flat();
+  const related = (await Promise.all(terms.map(query => searchMemoSummaries(db, { workspaceId: scope.workspaceId, query, limit: 4 }))))
+    .flat()
+    .filter(note => !note.encrypted);
   const ids = [...new Set([anchor.id, ...related.map(note => note.id), ...recent.map(note => note.id)])].slice(0, 12);
   const notes: MemoDetail[] = [];
   let budget = 12000;
   for (const id of ids) {
     const note = await getMemoDetail(db, scope.workspaceId, id);
-    if (!note) continue;
+    if (!note || note.encrypted || hasEncryptedNoteMarker(note.contentMarkdown)) continue;
     if (!note.contentMarkdown.trim() || note.contentMarkdown.length > Math.min(8000, budget)) {
       if (id === anchor.id) return []; // Never propose writes from truncated sources.
       continue;
@@ -275,7 +279,7 @@ export async function completeDiscoveryGeneration(db: DatabaseAdapter, scope: Co
     const candidates: MemoDetail[] = [];
     for (const id of candidateIds) {
       const note = await getMemoDetail(db, scope.workspaceId, id);
-      if (!note) throw changed();
+      if (!note || note.encrypted || hasEncryptedNoteMarker(note.contentMarkdown)) throw changed();
       candidates.push(note);
     }
     const memories = session.generationInput.memories ?? [];

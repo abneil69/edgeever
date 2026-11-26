@@ -1,5 +1,6 @@
 import {
   emptyDoc,
+  hasEncryptedNoteMarker,
   markdownToDoc,
   TemplateCreateSchema,
   TemplateUpdateSchema,
@@ -157,6 +158,12 @@ export const registerTemplateRoutes = (
     if (input.memoId && !memo) {
       return notFound(c, "Memo not found");
     }
+    if (
+      (memo && (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)))
+      || hasEncryptedNoteMarker(input.contentMarkdown)
+    ) {
+      return apiError(c, "encrypted_memo_forbidden", "Encrypted notes cannot be saved as templates.", 409);
+    }
 
     const id = createId("template");
     const now = new Date().toISOString();
@@ -198,6 +205,9 @@ export const registerTemplateRoutes = (
     const current = await getMemoTemplateRow(c.env.storage.db, workspaceId, id);
     if (!current) {
       return notFound(c, "Template not found");
+    }
+    if (hasEncryptedNoteMarker(input.contentMarkdown)) {
+      return apiError(c, "encrypted_memo_forbidden", "Encrypted notes cannot be saved as templates.", 409);
     }
 
     const contentMarkdown = input.contentMarkdown ?? current.content_markdown;

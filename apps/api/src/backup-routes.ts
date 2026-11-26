@@ -1,8 +1,11 @@
 import {
   emptyDoc,
+  hasEncryptedNoteMarker,
   JsonBackupResourceMetadataSchema,
+  RestoreJsonE2eeKeyringSchema,
   RestoreJsonMemosSchema,
   RestoreJsonNotebooksSchema,
+  WORKSPACE_E2EE_KDF_ALGORITHM,
   type JsonBackupMemo,
   type JsonBackupNotebook,
   type JsonBackupResource,
@@ -10,12 +13,15 @@ import {
   type MemoDetail,
   type Resource,
   type TiptapDoc,
+  type WorkspaceE2eeKeyring,
 } from "@edgeever/shared";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import type { Hono } from "hono";
-import type { AppContext, AppEnv } from "./api-context";
+import type { AppContext, AppEnv, Bindings } from "./api-context";
 import { AppError } from "./app-error";
+import { restoreJsonE2eeKeyring as restoreJsonE2eeKeyringService } from "./backup-service";
+import { isDemoModeEnabled } from "./demo-mode";
 import { isoNow, parseJsonArray } from "./entity-utils";
 import { apiError, badRequest, conflict, notFound } from "./http-errors";
 import { resolveObjectStorage } from "./object-storage";
@@ -88,6 +94,12 @@ type BackupRouteDependencies = {
     workspaceId: string,
     notebooks: JsonBackupNotebook[],
   ) => Promise<void>;
+  restoreJsonE2eeKeyring?: (
+    database: DatabaseAdapter,
+    workspaceId: string,
+    keyring: WorkspaceE2eeKeyring,
+  ) => Promise<WorkspaceE2eeKeyring>;
+  isDemoMode?: (environment: Bindings) => boolean;
   sha256Bytes: (bytes: Uint8Array) => Promise<string>;
   initiateResourceRestoreUpload: typeof initiateResourceRestoreUploadService;
 };
@@ -147,7 +159,32 @@ type BackupStateRow = {
   revisions: number;
   resources: number;
   prompts: number;
+  e2ee_keyring: number;
 };
+
+type BackupE2eeKeyringRow = {
+  key_id: string;
+  revision: number;
+  kdf_algorithm: string;
+  kdf_salt: string;
+  kdf_iterations: number;
+  wrapped_master_key: string;
+  master_key_iv: string;
+  created_at: string;
+  updated_at: string;
+};
+
+const mapBackupE2eeKeyring = (row: BackupE2eeKeyringRow): WorkspaceE2eeKeyring => ({
+  keyId: row.key_id,
+  revision: row.revision,
+  kdfAlgorithm: row.kdf_algorithm as typeof WORKSPACE_E2EE_KDF_ALGORITHM,
+  kdfSalt: row.kdf_salt,
+  kdfIterations: row.kdf_iterations,
+  wrappedMasterKey: row.wrapped_master_key,
+  masterKeyIv: row.master_key_iv,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
 
 // Page checks need only the transactional revision. Recounting every table here
 // makes a full backup quadratic in source size and can exhaust D1's daily reads.
@@ -162,7 +199,8 @@ const readBackupState = (database: DatabaseAdapter, workspaceId: string) => data
      (SELECT COUNT(*) FROM memos WHERE workspace_id = w.id AND is_deleted = 0) AS memos,
      (SELECT COUNT(*) FROM memo_revisions r JOIN memos m ON m.id = r.memo_id WHERE m.workspace_id = w.id AND m.is_deleted = 0) AS revisions,
      (SELECT COUNT(*) FROM resources r JOIN memos m ON m.id = r.memo_id WHERE m.workspace_id = w.id AND m.is_deleted = 0 AND r.is_deleted = 0) AS resources,
-     (SELECT COUNT(*) FROM ai_prompt_templates WHERE workspace_id = w.id) AS prompts
+     (SELECT COUNT(*) FROM ai_prompt_templates WHERE workspace_id = w.id) AS prompts,
+     (SELECT COUNT(*) FROM workspace_e2ee_keyrings WHERE workspace_id = w.id) AS e2ee_keyring
    FROM workspaces w WHERE w.id = ?`,
 ).bind(workspaceId).first<BackupStateRow>();
 
@@ -308,6 +346,7 @@ export const registerBackupRoutes = (
       workspaceId,
       identity: state.identity,
       backupRevision: state.backup_revision,
+      hasE2eeKeyring: Boolean(state.e2ee_keyring),
       counts: { notebooks: state.notebooks, memos: state.memos, revisions: state.revisions, resources: state.resources, prompts: state.prompts },
     });
   });
@@ -319,14 +358,14 @@ export const registerBackupRoutes = (
     if (restricted) return restricted;
     context.header("Cache-Control", "private, no-store");
     const kind = context.req.query("kind");
-    if (!["memos", "notebooks", "prompts"].includes(kind ?? "")) return badRequest(context, "Unknown backup data kind.");
+    if (!["memos", "notebooks", "prompts", "e2ee-keyring"].includes(kind ?? "")) return badRequest(context, "Unknown backup data kind.");
     if (kind === "notebooks") {
       const notebookDenied = requireScopes(context, "read:notebooks");
       if (notebookDenied) return notebookDenied;
     }
-    if (kind === "prompts") {
-      const promptDenied = requireUser(context);
-      if (promptDenied) return promptDenied;
+    if (kind === "prompts" || kind === "e2ee-keyring") {
+      const userDenied = requireUser(context);
+      if (userDenied) return userDenied;
     }
     const identity = context.req.query("identity");
     const revision = context.req.query("revision");
@@ -356,6 +395,15 @@ export const registerBackupRoutes = (
       )).bind(workspaceId, after, limit + 1).all<NotebookRow>();
       ids = rows.results.map((row) => row.id);
       result = { notebooks: rows.results.slice(0, limit).map(mapNotebook) };
+    } else if (kind === "e2ee-keyring") {
+      const row = await database.prepare(
+        `SELECT key_id, revision, kdf_algorithm, kdf_salt, kdf_iterations,
+                wrapped_master_key, master_key_iv, created_at, updated_at
+         FROM workspace_e2ee_keyrings
+         WHERE workspace_id = ?`,
+      ).bind(workspaceId).first<BackupE2eeKeyringRow>();
+      ids = [];
+      result = { e2eeKeyring: row ? mapBackupE2eeKeyring(row) : null };
     } else {
       const rows = await database.prepare(
         `SELECT ${AI_PROMPT_SELECT_COLUMNS} FROM ai_prompt_templates WHERE workspace_id = ? AND id > ? ORDER BY id ASC LIMIT ?`,
@@ -483,17 +531,58 @@ export const registerBackupRoutes = (
   );
 
   app.post(
+    "/api/v1/restores/json/e2ee-keyring",
+    zValidator("json", RestoreJsonE2eeKeyringSchema),
+    async (context) => {
+      const denied = requireUser(context);
+      if (denied) return denied;
+      context.header("Cache-Control", "private, no-store");
+      const checkDemoMode = dependencies.isDemoMode
+        ?? ((environment: Bindings) => isDemoModeEnabled(environment.EDGE_EVER_DEMO_MODE));
+      if (checkDemoMode(context.env)) {
+        return apiError(
+          context,
+          "e2ee_keyring_demo_disabled",
+          "Encryption keyring cannot be restored in demo mode.",
+          403,
+        );
+      }
+      try {
+        const restoreKeyring = dependencies.restoreJsonE2eeKeyring ?? restoreJsonE2eeKeyringService;
+        const e2eeKeyring = await restoreKeyring(
+          context.env.storage.db,
+          getWorkspaceId(context),
+          context.req.valid("json").e2eeKeyring,
+        );
+        return context.json({ ok: true, e2eeKeyring });
+      } catch (error) {
+        if (error instanceof AppError) {
+          return apiError(context, error.code, error.message, error.status);
+        }
+        throw error;
+      }
+    },
+  );
+
+  app.post(
     "/api/v1/restores/json/memos",
     zValidator("json", RestoreJsonMemosSchema),
     async (context) => {
       const denied = requireUser(context);
       if (denied) return denied;
-      await dependencies.restoreJsonMemos(
-        context.env.storage.db,
-        getWorkspaceId(context),
-        context.req.valid("json").memos as JsonBackupMemo[],
-      );
-      return context.json({ ok: true });
+      try {
+        await dependencies.restoreJsonMemos(
+          context.env.storage.db,
+          getWorkspaceId(context),
+          context.req.valid("json").memos as JsonBackupMemo[],
+        );
+        return context.json({ ok: true });
+      } catch (error) {
+        if (error instanceof AppError) {
+          return apiError(context, error.code, error.message, error.status);
+        }
+        throw error;
+      }
     },
   );
 
@@ -550,8 +639,17 @@ export const registerBackupRoutes = (
 
     const metadata = parsed.data as JsonBackupResource;
     const workspaceId = getWorkspaceId(context);
-    if (!(await dependencies.getMemoDetail(context.env.storage.db, workspaceId, metadata.memoId))) {
+    const targetMemo = await dependencies.getMemoDetail(context.env.storage.db, workspaceId, metadata.memoId);
+    if (!targetMemo) {
       return notFound(context, "Restore target memo not found.");
+    }
+    if (targetMemo.encrypted || hasEncryptedNoteMarker(targetMemo.contentMarkdown)) {
+      return apiError(
+        context,
+        "encrypted_memo_resources_forbidden",
+        "Images and attachments cannot be restored to an encrypted note.",
+        409,
+      );
     }
 
     const maxBytes = metadata.kind === "image" ? MAX_IMAGE_UPLOAD_BYTES : MAX_ATTACHMENT_UPLOAD_BYTES;

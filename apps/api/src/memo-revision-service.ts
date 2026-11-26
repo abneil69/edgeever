@@ -4,6 +4,8 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
+  hasEncryptedNoteMarker,
+  parseEncryptedNoteEnvelope,
   type MemoDetail,
   type MemoRevision,
   type TiptapDoc,
@@ -196,21 +198,74 @@ export const restoreMemoRevision = async (
   if (!revision) throw new AppError("not_found", "Memo revision not found", 404);
 
   const tags = parseJsonArray(revision.tags_json);
-  const contentJson = parseDoc(revision.content_json);
-  const contentMarkdown = revision.content_markdown || docToMarkdown(contentJson);
-  const contentText = revision.content_text || docToText(contentJson);
+  const parsedJson = parseDoc(revision.content_json);
+  const contentMarkdown = revision.content_markdown || docToMarkdown(parsedJson);
+  const isEncryptedRevision = hasEncryptedNoteMarker(contentMarkdown);
+  if (isEncryptedRevision && !parseEncryptedNoteEnvelope(contentMarkdown)) {
+    throw new AppError(
+      "invalid_encrypted_memo",
+      "Encrypted note content must be a single valid edgeever-encrypted-note envelope.",
+      400,
+    );
+  }
+  const currentEncrypted = hasEncryptedNoteMarker(current.content_markdown);
+  const now = isoNow();
+  if (isEncryptedRevision && !currentEncrypted) {
+    const existingResource = await db
+      .prepare(`SELECT id FROM resources WHERE memo_id = ? AND is_deleted = 0 LIMIT 1`)
+      .bind(memoId)
+      .first<{ id: string }>();
+    if (existingResource) {
+      throw new AppError(
+        "encrypted_memo_resources_forbidden",
+        "Remove all images and attachments before restoring an encrypted revision.",
+        409,
+      );
+    }
+    const pendingUpload = await db
+      .prepare(`SELECT id FROM resource_uploads WHERE memo_id = ? AND workspace_id = ? AND expires_at > ? LIMIT 1`)
+      .bind(memoId, workspaceId, now)
+      .first<{ id: string }>();
+    if (pendingUpload) {
+      throw new AppError(
+        "encrypted_memo_resources_forbidden",
+        "Finish or cancel pending uploads before restoring an encrypted revision.",
+        409,
+      );
+    }
+  }
+  const contentJson = isEncryptedRevision ? emptyDoc() : parsedJson;
+  const contentText = isEncryptedRevision ? "" : (revision.content_text || docToText(contentJson));
+  const excerpt = isEncryptedRevision ? "" : createExcerpt(contentText);
   const title = normalizeMemoTitle(revision.title);
   const contentHash = await sha256(contentMarkdown + JSON.stringify(contentJson));
   const nextRevision = current.revision + 1;
-  const now = isoNow();
+  const cleanupStatements = isEncryptedRevision && !currentEncrypted
+    ? [
+        db.prepare(
+          `DELETE FROM memo_revisions
+           WHERE memo_id = ? AND instr(content_markdown, '\`\`\`edgeever-encrypted-note') = 0`,
+        ).bind(memoId),
+        db.prepare(
+          `DELETE FROM memo_share_slug_claims
+           WHERE workspace_id = ?
+             AND slug IN (
+               SELECT slug FROM memo_shares
+               WHERE workspace_id = ? AND memo_id = ? AND slug IS NOT NULL
+             )`,
+        ).bind(workspaceId, workspaceId, memoId),
+        db.prepare(`DELETE FROM memo_shares WHERE workspace_id = ? AND memo_id = ?`).bind(workspaceId, memoId),
+      ]
+    : [];
 
   await db.batch([
-    createMemoRevisionStatement(db, current, actorLabel, now),
+    ...(isEncryptedRevision && !currentEncrypted ? [] : [createMemoRevisionStatement(db, current, actorLabel, now)]),
+    ...cleanupStatements,
     db.prepare(
       `UPDATE memos
        SET title = ?, excerpt = ?, tags_json = ?, updated_by = ?, updated_at = ?
        WHERE id = ? AND workspace_id = ? AND is_deleted = 0`,
-    ).bind(title, createExcerpt(contentText), JSON.stringify(tags), actorLabel, now, memoId, workspaceId),
+    ).bind(title, excerpt, JSON.stringify(tags), actorLabel, now, memoId, workspaceId),
     db.prepare(
       `UPDATE memo_contents
        SET content_json = ?, content_markdown = ?, content_text = ?, content_hash = ?,

@@ -1,6 +1,7 @@
 import {
   DeleteMemosSchema,
   DuplicateMemoSchema,
+  hasEncryptedNoteMarker,
   MemoCreateSchema,
   MergeMemosSchema,
   MemoUpdateSchema,
@@ -237,6 +238,14 @@ export const registerMemoRoutes = (
     }
     if (!(file instanceof File) || !notebookId || !contentMarkdown.includes("EDGEVERRESOURCEID")) {
       return badRequest(context, "notebookId, contentMarkdown, and an image file are required.");
+    }
+    if (hasEncryptedNoteMarker(contentMarkdown)) {
+      return apiError(
+        context,
+        "encrypted_memo_resources_forbidden",
+        "Images and attachments cannot be attached to an encrypted note.",
+        409,
+      );
     }
     assertNotebookAccess(
       await resolveRequestNotebookAccess(context),

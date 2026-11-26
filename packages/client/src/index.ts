@@ -96,6 +96,9 @@ import type {
   PluginAiGenerateRequest,
   PluginPublicFetchRequest,
   PluginPublicFetchResponse,
+  WorkspaceE2eeKeyring,
+  WorkspaceE2eeKeyringResponse,
+  WorkspaceE2eeKeyringUpsertInput,
 } from "@edgeever/shared";
 
 export { MAX_SINGLE_REQUEST_UPLOAD_BYTES } from "./resource-transfer";
@@ -632,6 +635,14 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
     changePassword: (payload: { currentPassword: string; newPassword: string; confirmPassword: string }) =>
       request<{ ok: true }>("/api/v1/auth/change-password", {
         method: "POST",
+        body: JSON.stringify(payload),
+      }),
+
+    getE2eeKeyring: () => request<WorkspaceE2eeKeyringResponse>("/api/v1/e2ee/keyring"),
+
+    putE2eeKeyring: (payload: WorkspaceE2eeKeyringUpsertInput) =>
+      request<WorkspaceE2eeKeyringResponse>("/api/v1/e2ee/keyring", {
+        method: "PUT",
         body: JSON.stringify(payload),
       }),
 
@@ -1452,6 +1463,23 @@ export const createEdgeEverClient = (options: EdgeEverClientOptions = {}) => {
       request<{ ok: true }>("/api/v1/restores/json/ai-prompts", {
         method: "POST",
         body: JSON.stringify({ prompts }),
+      }),
+
+    getBackupE2eeKeyring: (params: { identity: string; revision: string }) => {
+      const search = new URLSearchParams({
+        kind: "e2ee-keyring",
+        identity: params.identity,
+        revision: params.revision,
+      });
+      return request<{ e2eeKeyring: WorkspaceE2eeKeyring | null; nextCursor: null }>(
+        `/api/v1/backups/data?${search}`,
+      );
+    },
+
+    restoreJsonE2eeKeyring: (e2eeKeyring: WorkspaceE2eeKeyring) =>
+      request<{ ok: true; e2eeKeyring: WorkspaceE2eeKeyring }>("/api/v1/restores/json/e2ee-keyring", {
+        method: "POST",
+        body: JSON.stringify({ e2eeKeyring }),
       }),
 
     createJsonResourceRestoreSink: resources.createJsonResourceRestoreSink,

@@ -1,7 +1,7 @@
 import { requestPosterRender, readPosterRenderJob, posterRenderJob } from "./poster-render-service";
 import { applyPosterEdits, compilePosterMemo, posterCapabilities } from "./mcp-poster-tools";
 import { resolveObjectStorage } from "./object-storage";
-import { hasPosterDocumentMarker, parsePosterDocument, serializePosterDocument } from "@edgeever/shared";
+import { hasEncryptedNoteMarker, hasPosterDocumentMarker, parsePosterDocument, serializePosterDocument } from "@edgeever/shared";
 import {
   AiPromptTemplateCreateSchema,
   AiPromptTemplateUpdateSchema,
@@ -10,6 +10,7 @@ import {
   compileInfographicNote,
   DIAGRAM_DEFAULT_THEME,
   docToText,
+  emptyDoc,
   hasInfographicDocumentMarker,
   INFOGRAPHIC_SCHEMA_VERSION,
   infographicFallbackMarkdown,
@@ -217,14 +218,37 @@ const includeAllMemoFormats = (format: unknown) => {
   return format === "all";
 };
 
-const projectMcpMemo = (memo: MemoSummary | MemoDetail) => {
-  if (!("contentMarkdown" in memo) || memo.poster
-    || hasDiagramDocumentMarker(memo.contentMarkdown)
-    || hasTableDocumentMarker(memo.contentMarkdown)
-    || hasInfographicDocumentMarker(memo.contentMarkdown)) {
+const redactEncryptedMcpMemo = <T extends MemoSummary | MemoDetail>(memo: T): T => {
+  if (!memo.encrypted && (!("contentMarkdown" in memo) || !hasEncryptedNoteMarker(memo.contentMarkdown))) {
     return memo;
   }
-  const { contentJson, contentText, ...markdownMemo } = memo;
+  if (!("contentMarkdown" in memo)) {
+    return { ...memo, encrypted: true, excerpt: "" };
+  }
+  return {
+    ...memo,
+    encrypted: true,
+    excerpt: "",
+    contentMarkdown: "",
+    contentText: "",
+    contentJson: emptyDoc(),
+  };
+};
+
+const projectMcpMemo = (memo: MemoSummary | MemoDetail) => {
+  const safe = redactEncryptedMcpMemo(memo);
+  if (!("contentMarkdown" in safe) || safe.poster
+    || safe.encrypted
+    || hasDiagramDocumentMarker(safe.contentMarkdown)
+    || hasTableDocumentMarker(safe.contentMarkdown)
+    || hasInfographicDocumentMarker(safe.contentMarkdown)) {
+    if (safe.encrypted && "contentMarkdown" in safe) {
+      const { contentJson: _contentJson, contentText: _contentText, ...summaryMemo } = safe;
+      return summaryMemo;
+    }
+    return safe;
+  }
+  const { contentJson, contentText, ...markdownMemo } = safe;
   return markdownMemo;
 };
 
@@ -342,9 +366,10 @@ export const callMcpTool = async (
         poster: typeof args.poster === "boolean" ? args.poster : null,
         notebookAccess,
       });
+      const redactedMemos = page.memos.map(redactEncryptedMcpMemo);
       return includeContent && !includeAllFormats
-        ? { ...page, memos: page.memos.map(projectMcpMemo) }
-        : page;
+        ? { ...page, memos: redactedMemos.map(projectMcpMemo) }
+        : { ...page, memos: redactedMemos };
     }
     case "get_memo": {
       assertScope(auth, "read:memos");
@@ -356,6 +381,13 @@ export const callMcpTool = async (
         throw new Error("Memo not found");
       }
       assertMemoAccess(memo, "read", "read this memo");
+      if (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)) {
+        throw new AppError(
+          "encrypted_memo_forbidden",
+          "This note is end-to-end encrypted and its body cannot be read through MCP or AI tools.",
+          403,
+        );
+      }
 
       const diagram = parseDiagramDocument(memo.contentMarkdown);
       if (diagram) return { memo: memoWithoutDiagramPayload(memo), diagram: diagramSemanticGraph(diagram) };
@@ -504,14 +536,29 @@ export const callMcpTool = async (
       assertScope(auth, "write:memos");
       const notebookId = getRequiredString(args.notebookId, "notebookId");
       assertNotebookAccess(notebookAccess, "write", notebookId, "create a memo");
+      const contentMarkdown = getOptionalString(args.contentMarkdown) ?? "";
+      const resourceIds = parseResourceIds(args.resourceIds) ?? [];
+      if (hasEncryptedNoteMarker(contentMarkdown)) {
+        if (resourceIds.length > 0) {
+          throw new AppError(
+            "encrypted_memo_resources_forbidden",
+            "Images and attachments cannot be attached to an encrypted note.",
+            409,
+          );
+        }
+        throw new AppError(
+          "encrypted_memo_forbidden",
+          "Encrypted notes cannot be created through MCP or AI tools.",
+          409,
+        );
+      }
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
-      const resourceIds = parseResourceIds(args.resourceIds) ?? [];
       const bind = await preparePendingResourceBinding(c.env.storage.db, auth, resourceIds, actor);
       const memo = await withBindingConflict(Boolean(bind), () => createMemoRecord(c.env.storage.db, auth.workspaceId, {
         notebookId,
         title: getOptionalString(args.title) ?? undefined,
-        contentMarkdown: getOptionalString(args.contentMarkdown) ?? "",
+        contentMarkdown,
         tags: getOptionalStringArray(args.tags),
         createdAt: getOptionalString(args.createdAt) ?? undefined,
         updatedAt: getOptionalString(args.updatedAt) ?? undefined,
@@ -599,6 +646,9 @@ export const callMcpTool = async (
       const renderMemo = await getMemoDetail(c.env.storage.db, auth.workspaceId, getRequiredString(args.memoId, "memoId"));
       if (!renderMemo) throw new AppError("not_found", "Memo not found", 404);
       assertMemoAccess(renderMemo, "write", "request a poster render");
+      if (renderMemo.encrypted || hasEncryptedNoteMarker(renderMemo.contentMarkdown)) {
+        throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be rendered as posters.", 409);
+      }
       const input = {
         workspace: auth.workspaceId,
         memoId: renderMemo.id,
@@ -756,16 +806,41 @@ export const callMcpTool = async (
     case "update_memo": {
       assertScope(auth, "write:memos");
       const memoId = getRequiredString(args.memoId, "memoId");
+      const existing = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
       if (notebookAccess.restricted) {
-        const existing = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
         if (existing) assertMemoAccess(existing, "write", "update this memo");
         const targetNotebookId = getOptionalString(args.notebookId);
         if (targetNotebookId) {
           assertNotebookAccess(notebookAccess, "write", targetNotebookId, "move this memo");
         }
       }
+      const nextMarkdown = getOptionalString(args.contentMarkdown);
+      const resourceIds = parseResourceIds(args.resourceIds) ?? [];
+      const existingEncrypted = Boolean(
+        existing && (existing.encrypted || hasEncryptedNoteMarker(existing.contentMarkdown)),
+      );
+      if (resourceIds.length > 0 && (existingEncrypted || hasEncryptedNoteMarker(nextMarkdown))) {
+        throw new AppError(
+          "encrypted_memo_resources_forbidden",
+          "Images and attachments cannot be attached to an encrypted note.",
+          409,
+        );
+      }
       if (args.contentMarkdown !== undefined) {
-        const existing = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId);
+        if (existingEncrypted) {
+          throw new AppError(
+            "encrypted_memo_forbidden",
+            "Encrypted note content cannot be replaced through MCP or AI tools.",
+            409,
+          );
+        }
+        if (hasEncryptedNoteMarker(nextMarkdown)) {
+          throw new AppError(
+            "encrypted_memo_forbidden",
+            "Encrypted note envelopes cannot be written through MCP or AI tools.",
+            409,
+          );
+        }
         if (existing && parseDiagramDocument(existing.contentMarkdown)) {
           throw new AppError(
             "diagram_update_required",
@@ -793,7 +868,6 @@ export const callMcpTool = async (
       }
       const actor = getAuditActor(c);
       const actorLabel = getActorLabel(c);
-      const resourceIds = parseResourceIds(args.resourceIds) ?? [];
       const bind = await preparePendingResourceBinding(c.env.storage.db, auth, resourceIds, actor);
       const result = await withBindingConflict(Boolean(bind), () => updateMemoRecord(
         c.env.storage.db,
@@ -1023,6 +1097,13 @@ export const callMcpTool = async (
       // must authorize the same deleted state it will actually serve.
       const revisionMemo = await getMemoDetail(c.env.storage.db, auth.workspaceId, revisionMemoId, true);
       if (revisionMemo) assertMemoAccess(revisionMemo, "read", "list revisions of this memo");
+      if (revisionMemo && (revisionMemo.encrypted || hasEncryptedNoteMarker(revisionMemo.contentMarkdown))) {
+        throw new AppError(
+          "encrypted_memo_forbidden",
+          "Encrypted note revisions cannot be accessed through MCP or AI tools.",
+          403,
+        );
+      }
       return {
         revisions: await listMemoRevisionsService(
           c.env.storage.db,
@@ -1041,6 +1122,13 @@ export const callMcpTool = async (
       const revisionMemo = await getMemoDetail(c.env.storage.db, auth.workspaceId, memoId, true);
       if (!revisionMemo) throw new AppError("not_found", "Memo not found", 404);
       assertMemoAccess(revisionMemo, "write", "restore this memo's revision");
+      if (revisionMemo.encrypted || hasEncryptedNoteMarker(revisionMemo.contentMarkdown)) {
+        throw new AppError(
+          "encrypted_memo_forbidden",
+          "Encrypted note revisions cannot be restored through MCP or AI tools.",
+          409,
+        );
+      }
       const revisionId = getRequiredString(args.revisionId, "revisionId");
       const revision = await getMemoRevisionRowService(c.env.storage.db, auth.workspaceId, memoId, revisionId);
 
@@ -1216,6 +1304,12 @@ export const callMcpTool = async (
         : null;
       if (input.memoId && !memo) throw new AppError("not_found", "Memo not found", 404);
       if (memo) assertMemoAccess(memo, "read", "create a template from this memo");
+      if (
+        (memo && (memo.encrypted || hasEncryptedNoteMarker(memo.contentMarkdown)))
+        || hasEncryptedNoteMarker(input.contentMarkdown)
+      ) {
+        throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be saved as templates.", 409);
+      }
 
       const id = createId("template");
       const now = isoNow();
@@ -1256,6 +1350,9 @@ export const callMcpTool = async (
       }
       const current = await getMemoTemplate(c.env.storage.db, auth.workspaceId, templateId);
       if (!current) throw new AppError("not_found", "Template not found", 404);
+      if (hasEncryptedNoteMarker(input.contentMarkdown)) {
+        throw new AppError("encrypted_memo_forbidden", "Encrypted notes cannot be saved as templates.", 409);
+      }
 
       const contentMarkdown = input.contentMarkdown ?? current.contentMarkdown;
       const contentJson = input.contentMarkdown !== undefined

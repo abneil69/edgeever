@@ -1,4 +1,4 @@
-import { createExcerpt, docToText, emptyDoc, type MemoDetail, type TiptapDoc } from "@edgeever/shared";
+import { createExcerpt, docToText, emptyDoc, hasEncryptedNoteMarker, type MemoDetail, type TiptapDoc } from "@edgeever/shared";
 import { auditStatement } from "./audit";
 import type { AppContext, AuditActor } from "./api-context";
 import { AppError } from "./app-error";
@@ -86,6 +86,13 @@ export const duplicateMemoRecord = async (
   const workspaceId = getWorkspaceId(context);
   const source = await getMemoDetailRow(db, workspaceId, memoId);
   if (!source) throw new AppError("not_found", "Memo not found", 404);
+  if (hasEncryptedNoteMarker(source.content_markdown)) {
+    throw new AppError(
+      "encrypted_memo_duplicate_forbidden",
+      "Encrypted notes cannot be duplicated on the server.",
+      409,
+    );
+  }
 
   const notebookId = input.notebookId ?? source.notebook_id;
   if (!(await notebookExists(db, workspaceId, notebookId))) {

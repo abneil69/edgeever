@@ -4,7 +4,7 @@ import type {
   CompanionAnswer, CompanionMemory, CompanionModelContentPart, CompanionPreparedMessage, CompanionPreparedTurn,
   CompanionQuestion, CompanionTodo, CompanionToolCall, CompanionTurnInput,
 } from "@edgeever/shared";
-import { AI_COMPANION_MAX_OUTPUT_TOKENS, COMPANION_MATH_FORMAT_INSTRUCTION, INDEPENDENT_DIAGRAM_FOCUS_NOTE, OPEN_NOTE_DIAGRAM_FOCUS_NOTE, POSTER_TEMPLATE_SELECTION_INSTRUCTION, conversationLanguage, explicitDiagramKind, independentDiagramRequest, translationTargetInstruction } from "@edgeever/shared";
+import { AI_COMPANION_MAX_OUTPUT_TOKENS, COMPANION_MATH_FORMAT_INSTRUCTION, INDEPENDENT_DIAGRAM_FOCUS_NOTE, OPEN_NOTE_DIAGRAM_FOCUS_NOTE, POSTER_TEMPLATE_SELECTION_INSTRUCTION, conversationLanguage, explicitDiagramKind, hasEncryptedNoteMarker, independentDiagramRequest, translationTargetInstruction } from "@edgeever/shared";
 import { localeEnglishNames } from "@edgeever/shared/i18n/locales";
 import { AppError } from "./app-error";
 import type { DatabaseAdapter } from "./storage-contract";
@@ -99,10 +99,14 @@ export function companionUserContent(input: CompanionTurnInput): string {
     lines.push(`Open note is an editable ${focus.diagramKind}. Call get_diagram before changing it.`);
   }
   const selection = focus?.selectionMarkdown?.trim();
-  if (selection) lines.push(`Selected text:\n${selection}`);
+  if (selection && !hasEncryptedNoteMarker(selection)) lines.push(`Selected text:\n${selection}`);
   const body = focus?.contentMarkdown?.trim();
   if (body && !focus?.diagramKind) {
-    lines.push(`Open note body (DATA${focus?.contentTruncated ? ", truncated; call get_memo for the rest" : ""}):\n${body}`);
+    if (hasEncryptedNoteMarker(body)) {
+      lines.push("Open note is end-to-end encrypted; its body is unavailable to the companion.");
+    } else {
+      lines.push(`Open note body (DATA${focus?.contentTruncated ? ", truncated; call get_memo for the rest" : ""}):\n${body}`);
+    }
   }
   lines.push("", input.message);
   return lines.join("\n");

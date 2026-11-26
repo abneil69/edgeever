@@ -20,6 +20,16 @@ import {
 } from "./ai-assistant";
 import { AI_MODEL_OUTPUT_BUDGET_LIMITS, type AiModelOutputBudgetField } from "./ai-output-budgets";
 import { AI_MODEL_CAPABILITY_MAX_TOKENS, AI_MODEL_CAPABILITY_SOURCES } from "./ai-model-capabilities";
+import {
+  decodeBase64Strict,
+  WORKSPACE_E2EE_IV_BYTES,
+  WORKSPACE_E2EE_KDF_ALGORITHM,
+  WORKSPACE_E2EE_KDF_MAX_ITERATIONS,
+  WORKSPACE_E2EE_KDF_MIN_ITERATIONS,
+  WORKSPACE_E2EE_KDF_SALT_BYTES,
+  WORKSPACE_E2EE_KEY_ID_PATTERN,
+  WORKSPACE_E2EE_WRAPPED_KEY_BYTES,
+} from "./e2ee";
 
 export const NotebookCreateSchema = z.object({
   name: z.string().trim().min(1).max(80),
@@ -656,6 +666,57 @@ export const PublicTableFormSubmissionSchema = z.object({
   cells: z.record(z.string().max(80), z.unknown()),
 });
 
+const exactBase64Bytes = (byteLength: number, fieldName: string) =>
+  z.string().refine((value) => {
+    const decoded = decodeBase64Strict(value);
+    return decoded !== null && decoded.byteLength === byteLength;
+  }, `${fieldName} must be valid base64 representing ${byteLength} bytes.`);
+
+export const WorkspaceE2eeKeyringUpsertSchema = z
+  .object({
+    keyId: z.string().regex(WORKSPACE_E2EE_KEY_ID_PATTERN),
+    expectedRevision: z.number().int().min(1).optional(),
+    kdfAlgorithm: z.literal(WORKSPACE_E2EE_KDF_ALGORITHM),
+    kdfSalt: exactBase64Bytes(WORKSPACE_E2EE_KDF_SALT_BYTES, "kdfSalt"),
+    kdfIterations: z
+      .number()
+      .int()
+      .min(WORKSPACE_E2EE_KDF_MIN_ITERATIONS)
+      .max(WORKSPACE_E2EE_KDF_MAX_ITERATIONS),
+    wrappedMasterKey: exactBase64Bytes(WORKSPACE_E2EE_WRAPPED_KEY_BYTES, "wrappedMasterKey"),
+    masterKeyIv: exactBase64Bytes(WORKSPACE_E2EE_IV_BYTES, "masterKeyIv"),
+  })
+  .strict();
+
+export const WorkspaceE2eeKeyringSchema = z
+  .object({
+    keyId: z.string().regex(WORKSPACE_E2EE_KEY_ID_PATTERN),
+    revision: z.number().int().min(1),
+    kdfAlgorithm: z.literal(WORKSPACE_E2EE_KDF_ALGORITHM),
+    kdfSalt: exactBase64Bytes(WORKSPACE_E2EE_KDF_SALT_BYTES, "kdfSalt"),
+    kdfIterations: z
+      .number()
+      .int()
+      .min(WORKSPACE_E2EE_KDF_MIN_ITERATIONS)
+      .max(WORKSPACE_E2EE_KDF_MAX_ITERATIONS),
+    wrappedMasterKey: exactBase64Bytes(WORKSPACE_E2EE_WRAPPED_KEY_BYTES, "wrappedMasterKey"),
+    masterKeyIv: exactBase64Bytes(WORKSPACE_E2EE_IV_BYTES, "masterKeyIv"),
+    createdAt: z.string(),
+    updatedAt: z.string(),
+  })
+  .strict();
+
+export const WorkspaceE2eeKeyringResponseSchema = z.discriminatedUnion("configured", [
+  z.object({
+    configured: z.literal(false),
+    keyring: z.null(),
+  }),
+  z.object({
+    configured: z.literal(true),
+    keyring: WorkspaceE2eeKeyringSchema,
+  }),
+]);
+
 export type TableFormFieldSetting = z.infer<typeof TableFormFieldSchema>;
 
 export type TableFormSettings = {
@@ -732,3 +793,4 @@ export type MemoShareUpdateInput = z.infer<typeof MemoShareUpdateSchema>;
 export type PublicShareUnlockInput = z.infer<typeof PublicShareUnlockSchema>;
 export type TableFormUpdateInput = z.infer<typeof TableFormUpdateSchema>;
 export type PublicTableFormSubmissionInput = z.infer<typeof PublicTableFormSubmissionSchema>;
+export type WorkspaceE2eeKeyringUpsertInput = z.infer<typeof WorkspaceE2eeKeyringUpsertSchema>;
