@@ -5,7 +5,9 @@ import {
   docToMarkdown,
   docToText,
   emptyDoc,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
+  isValidEncryptedNoteEnvelope,
   hasSyncCursorRewound,
   hasSyncStateReset,
   markdownToDoc,
@@ -83,12 +85,17 @@ const setMeta = async (scope: string, key: string, value: string) => {
 };
 
 const sanitizeMemoForLocalMirror = (memo: MemoDetail): MemoDetail => {
-  if (!hasEncryptedNoteMarker(memo.contentMarkdown)) return memo;
+  if (!hasEncryptedNoteMarker(memo.contentMarkdown)) {
+    if (!("encrypted" in memo) || memo.encrypted === undefined) return memo;
+    const { encrypted: _encrypted, ...plainMemo } = memo;
+    return plainMemo;
+  }
   return {
     ...memo,
     excerpt: "",
     contentText: "",
     contentJson: emptyDoc(),
+    encrypted: true,
   };
 };
 
@@ -137,9 +144,13 @@ const applyChanges = async (scope: string, changes: SyncChangesResponse["changes
           await localDb.memos.delete([scope, change.entityId]);
         } else {
           const previous = await localDb.memos.get([scope, change.entityId]);
+          const nextIsEncrypted = isValidEncryptedNoteEnvelope(change.memo.contentMarkdown);
+          if (hasEncryptedNoteFencePrefix(change.memo.contentMarkdown) && !nextIsEncrypted) {
+            throw new Error("Encrypted note content must be a single valid edgeever-encrypted-note envelope.");
+          }
           const next = sanitizeMemoForLocalMirror(change.memo);
           await localDb.memos.put({ ...next, scope });
-          if (hasEncryptedNoteMarker(next.contentMarkdown) && (!previous || !hasEncryptedNoteMarker(previous.contentMarkdown))) {
+          if (nextIsEncrypted && (!previous || !hasEncryptedNoteMarker(previous.contentMarkdown))) {
             await localDb.revisions.where("scope").equals(scope).filter((rev) => rev.memoId === change.entityId).delete();
             await localDb.drafts.delete(change.entityId);
           }
@@ -341,7 +352,10 @@ export const createLocalMemo = async (
   },
 ) => {
   const now = new Date().toISOString();
-  const encrypted = hasEncryptedNoteMarker(input.contentMarkdown);
+  const encrypted = isValidEncryptedNoteEnvelope(input.contentMarkdown);
+  if (hasEncryptedNoteFencePrefix(input.contentMarkdown) && !encrypted) {
+    throw new Error("Encrypted note content must be a single valid edgeever-encrypted-note envelope.");
+  }
   const contentJson = encrypted ? emptyDoc() : (input.contentJson ?? markdownToDoc(input.contentMarkdown ?? ""));
   const contentMarkdown = input.contentMarkdown ?? docToMarkdown(contentJson);
   const contentText = encrypted ? "" : docToText(contentJson);
@@ -462,21 +476,29 @@ export const replaceLocalMemoId = async (scope: string, temporaryId: string, mem
 export const putLocalMemoUpdate = async (
   scope: string,
   memo: MemoDetail,
-  input: { title: string; contentJson: TiptapDoc; contentMarkdown?: string; tags: string[] },
+  input: { title: string; contentJson: TiptapDoc; contentMarkdown?: string; tags: string[]; e2eeTransition?: "decrypt" },
 ) => {
   const nextMarkdown = input.contentMarkdown ?? docToMarkdown(input.contentJson);
-  const isEncrypted = hasEncryptedNoteMarker(nextMarkdown);
+  const isEncrypted = isValidEncryptedNoteEnvelope(nextMarkdown);
+  if (hasEncryptedNoteFencePrefix(nextMarkdown) && !isEncrypted) {
+    throw new Error("Encrypted note content must be a single valid edgeever-encrypted-note envelope.");
+  }
   const wasEncrypted = hasEncryptedNoteMarker(memo.contentMarkdown);
+  if (wasEncrypted && !isEncrypted && input.e2eeTransition !== "decrypt") {
+    throw new Error("encrypted_memo_decrypt_requires_intent: Decrypting an encrypted note requires explicit e2eeTransition.");
+  }
   const contentJson = isEncrypted ? emptyDoc() : input.contentJson;
   const contentText = isEncrypted ? "" : docToText(contentJson);
+  const { encrypted: _previousEncrypted, ...baseMemo } = memo;
   const updatedMemo: MemoDetail = {
-    ...memo,
+    ...baseMemo,
     title: input.title.trim() || null,
     excerpt: isEncrypted ? "" : createExcerpt(contentText),
     tags: input.tags,
     contentJson,
     contentMarkdown: nextMarkdown,
     contentText,
+    ...(isEncrypted ? { encrypted: true } : {}),
     updatedAt: new Date().toISOString(),
   };
   await putLocalMemo(scope, updatedMemo);

@@ -288,7 +288,7 @@ describe("Phase 2 E2EE security boundaries", () => {
     expect(editorPaneSource).toContain("disabled: isEncryptedNote");
     expect(editorPaneSource).toContain("onSearch={isEncryptedNote ? undefined : () => openNoteSearch()}");
     expect(editorPaneSource).toContain("if (isEncryptedNoteRef.current) {\n          event.preventDefault();\n          return true;\n        }");
-    expect(editorPaneSource).toContain("decryptedState.cipherMarkdown === target.contentMarkdown");
+    expect(editorPaneSource).toContain("cached.cipherMarkdown === target.contentMarkdown");
 
     const revisionDialogSource = readFileSync(
       new URL("../../components/dialogs/RevisionHistoryDialog.tsx", import.meta.url),
@@ -302,5 +302,69 @@ describe("Phase 2 E2EE security boundaries", () => {
       "utf8",
     );
     expect(repositorySource).toContain("hasEncryptedNoteMarker(revision.contentMarkdown)\n      ? emptyDoc()");
+  });
+
+  test("encrypted notes gate plaintext export/copy behind confirmation and avoid outline/spellcheck persistence", async () => {
+    const { readOutlineSnapshot, removeOutlineSnapshot, writeOutlineSnapshot } = await import("../editor-outline-state.ts");
+    const store = new Map();
+    const originalWindow = globalThis.window;
+    globalThis.window = {
+      localStorage: {
+        getItem: (k) => store.get(k) ?? null,
+        setItem: (k, v) => { store.set(k, String(v)); },
+        removeItem: (k) => { store.delete(k); },
+      },
+    };
+    try {
+      writeOutlineSnapshot("memo_enc_outline", {
+        items: [{ level: 1, pos: 0, text: "Secret Heading" }],
+        collapsed: [0],
+      });
+      expect(readOutlineSnapshot("memo_enc_outline")?.items[0]?.text).toBe("Secret Heading");
+      removeOutlineSnapshot("memo_enc_outline");
+      expect(readOutlineSnapshot("memo_enc_outline")).toBeNull();
+      expect(store.size).toBe(0);
+    } finally {
+      globalThis.window = originalWindow;
+    }
+
+    const editorPaneSource = readFileSync(
+      new URL("../../components/EditorPane.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(editorPaneSource).toContain("const effectiveSpellcheckEnabled = !isEncryptedNote && spellcheckEnabled;");
+    expect(editorPaneSource).toContain("persist={!isEncryptedNote}");
+    expect(editorPaneSource).toContain("removeOutlineSnapshot(target.id);");
+    expect(editorPaneSource).toContain("<EncryptedPlaintextExportConfirmDialog");
+
+    const editorOutlineSource = readFileSync(
+      new URL("../../components/EditorOutline.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(editorOutlineSource).toContain("if (!persist) return;");
+    expect(editorOutlineSource).toContain("removeOutlineSnapshot(memoId);");
+
+    const docActionsSource = readFileSync(
+      new URL("../../components/editor/useEditorDocumentActions.ts", import.meta.url),
+      "utf8",
+    );
+    expect(docActionsSource).toContain('setPendingPlaintextExport("export-markdown")');
+    expect(docActionsSource).toContain('setPendingPlaintextExport("export-html")');
+    expect(docActionsSource).toContain('setPendingPlaintextExport("export-pdf")');
+    expect(docActionsSource).toContain('setPendingPlaintextExport("share-image")');
+    expect(docActionsSource).toContain('setPendingPlaintextExport("copy-wechat")');
+
+    const mermaidCodeBlockSource = readFileSync(
+      new URL("../../components/MermaidCodeBlock.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(mermaidCodeBlockSource).toContain('editor?.view?.dom?.getAttribute("data-encrypted-note") === "true"');
+    expect(mermaidCodeBlockSource).toContain("<EncryptedPlaintextExportConfirmDialog");
+
+    const memoListSource = readFileSync(
+      new URL("../../components/MemoListPane.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(memoListSource).toContain('action === "export-pdf" && !memo.encrypted ? preopenNotePrintWindow() : undefined');
   });
 });

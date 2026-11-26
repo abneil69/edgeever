@@ -11,8 +11,13 @@ export * from "./session-store";
 export const useE2eeSession = (): E2eeSessionSnapshot =>
   useSyncExternalStore(e2eeSession.subscribe, e2eeSession.getSnapshot, e2eeSession.getSnapshot);
 
-export const isEncryptedMemo = (memo: { encrypted?: boolean; contentMarkdown?: string | null } | null | undefined): boolean =>
-  Boolean(memo && (memo.encrypted === true || hasEncryptedNoteMarker(memo.contentMarkdown)));
+export const isEncryptedMemo = (memo: { encrypted?: boolean; contentMarkdown?: string | null } | null | undefined): boolean => {
+  if (!memo) return false;
+  if (typeof memo.contentMarkdown === "string") {
+    return hasEncryptedNoteMarker(memo.contentMarkdown);
+  }
+  return memo.encrypted === true;
+};
 
 /**
  * Create a brand-new encrypted note whose ciphertext envelope is bound to the

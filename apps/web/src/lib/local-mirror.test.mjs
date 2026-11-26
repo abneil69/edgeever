@@ -543,7 +543,7 @@ describe("local mirror", () => {
 
   test("putLocalMemoUpdate removes only non-encrypted local revisions when transitioning plaintext back to encrypted", async () => {
     const scope = createLocalDataScope("https://demo.edgeever.org", "user-e2ee");
-    const encryptedEnvelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\",\"wrappedDek\":\"AAAA\",\"dekIv\":\"AAAA\",\"iv\":\"AAAA\",\"ciphertext\":\"AAAA\"}\n```";
+    const encryptedEnvelope = "```edgeever-encrypted-note\n{\"v\":1,\"alg\":\"A256GCM\",\"keyId\":\"ek_test1234\",\"wrappedDek\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"dekIv\":\"AAAAAAAAAAAAAAAA\",\"iv\":\"AAAAAAAAAAAAAAAA\",\"ciphertext\":\"AAAAAAAAAAAAAAAAAAAAAA==\"}\n```";
     const memo = {
       id: "memo-e2ee-rev-1",
       notebookId: "nb-1",
@@ -599,11 +599,33 @@ describe("local mirror", () => {
       contentMarkdown: encryptedEnvelope,
       tags: ["vault"],
     });
+    expect(updated.encrypted).toBe(true);
     expect(updated.excerpt).toBe("");
     expect(updated.contentText).toBe("");
     expect(updated.contentJson).toEqual({ type: "doc", content: [{ type: "paragraph" }] });
 
     const remaining = await listLocalMemoRevisions(scope, memo.id);
     expect(remaining.revisions.map((rev) => rev.id)).toEqual(["rev-enc-old"]);
+
+    // Decrypting without explicit e2eeTransition is rejected locally; explicit intent succeeds.
+    await expect(
+      putLocalMemoUpdate(scope, updated, {
+        title: "Vault",
+        contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Silent plain" }] }] },
+        contentMarkdown: "Silent plain",
+        tags: ["vault"],
+      }),
+    ).rejects.toThrow("encrypted_memo_decrypt_requires_intent");
+
+    const decrypted = await putLocalMemoUpdate(scope, updated, {
+      title: "Vault",
+      contentJson: { type: "doc", content: [{ type: "paragraph", content: [{ type: "text", text: "Explicit plain" }] }] },
+      contentMarkdown: "Explicit plain",
+      tags: ["vault"],
+      e2eeTransition: "decrypt",
+    });
+    expect(decrypted.encrypted).toBeUndefined();
+    expect(decrypted.contentMarkdown).toBe("Explicit plain");
+    expect(decrypted.excerpt).toBe("Explicit plain");
   });
 });

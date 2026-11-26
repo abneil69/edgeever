@@ -1,7 +1,9 @@
 import type { createEdgeEverClient, ListMemosResponse, MemoFilterMode, MemoSortMode } from "@edgeever/client";
 import {
   emptyDoc,
+  hasEncryptedNoteFencePrefix,
   hasEncryptedNoteMarker,
+  isValidEncryptedNoteEnvelope,
   hasSyncStateReset,
   isSyncMetadataInitialized,
   splitSyncBootstrapWriteBatches,
@@ -191,8 +193,10 @@ export const listLocalMemos = async (scope: string, params: LocalMemoListParams)
 };
 
 const sanitizeMobileMemoForLocalMirror = (memo: MemoDetail): MemoDetail => {
-  if (!memo.encrypted && !hasEncryptedNoteMarker(memo.contentMarkdown)) {
-    return memo;
+  if (!hasEncryptedNoteMarker(memo.contentMarkdown)) {
+    if (!("encrypted" in memo) || memo.encrypted === undefined) return memo;
+    const { encrypted: _encrypted, ...plainMemo } = memo;
+    return plainMemo;
   }
   return {
     ...memo,
@@ -422,7 +426,23 @@ const upsertNotebook = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: stri
   );
 
 const upsertMemo = (db: Pick<SQLite.SQLiteDatabase, "runAsync">, scope: string, rawMemo: MemoDetail) => {
-  const memo = sanitizeMobileMemoForLocalMirror(rawMemo);
+  const validEncrypted = isValidEncryptedNoteEnvelope(rawMemo.contentMarkdown);
+  if (hasEncryptedNoteFencePrefix(rawMemo.contentMarkdown) && !validEncrypted) {
+    throw new Error("Encrypted note content must be a single valid edgeever-encrypted-note envelope.");
+  }
+  const memo: MemoDetail = validEncrypted
+    ? {
+        ...rawMemo,
+        excerpt: "",
+        contentText: "",
+        contentJson: emptyDoc(),
+        encrypted: true,
+      }
+    : (() => {
+        if (!("encrypted" in rawMemo) || rawMemo.encrypted === undefined) return rawMemo;
+        const { encrypted: _encrypted, ...plainMemo } = rawMemo;
+        return plainMemo;
+      })();
   return db.runAsync(
     `INSERT OR REPLACE INTO mobile_memos
       (scope, id, notebook_id, title, content_text, tags_text, is_pinned, is_deleted, created_at, updated_at, deleted_at, data_json)

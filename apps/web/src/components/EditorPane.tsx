@@ -189,6 +189,7 @@ import { activeExternalImageHost, uploadImageWithPicGo } from "@/lib/picgo";
 import { compressImageForUpload } from "@/lib/image-compression";
 import { LOCAL_DATABASE_INTERRUPTED_EVENT, localDb, selectNewestLocalDraft, type MemoUpdateSyncPayload } from "@/lib/local-db";
 import { persistEmergencyDraft, readEmergencyDraft, removeEmergencyDraft } from "@/lib/emergency-draft";
+import { removeOutlineSnapshot } from "@/lib/editor-outline-state";
 import { getMemoUpdateQueueId, isMemoUpdateAlreadyApplied, queueMemoUpdate } from "@/lib/sync-queue";
 import {
   getMemoSaveConflictInfoFromQueueItem,
@@ -200,7 +201,7 @@ import { createClientUuid } from "@/lib/client-id";
 import { deleteLocalMemoRevisions, isLocalMemoId, remapLocalDraftMemoId } from "@/lib/local-mirror";
 import { e2eeSession, isEncryptedMemo, useE2eeSession } from "@/lib/e2ee";
 import { EncryptedNoteLockScreen } from "./e2ee/EncryptedNoteLockScreen";
-import { E2eeSetupDialog, E2eeUnlockDialog } from "./e2ee/E2eePassphraseDialogs";
+import { E2eeSetupDialog, E2eeUnlockDialog, EncryptedPlaintextExportConfirmDialog } from "./e2ee/E2eePassphraseDialogs";
 import { AppConfirmDialog } from "./dialogs/ConfirmDialogs";
 import { shouldAcceptRemoteMemoDetail } from "@/lib/memo-detail-freshness";
 import type { EdgeEverRepository } from "@/lib/repository";
@@ -438,6 +439,8 @@ export const EditorPane = (props: EditorPaneProps) => {
     cipherMarkdown: string;
     plaintextMarkdown: string;
   } | null>(null);
+  const decryptedStateRef = useRef(decryptedState);
+  decryptedStateRef.current = decryptedState;
   const [decrypting, setDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [decryptAttempt, setDecryptAttempt] = useState(0);
@@ -449,19 +452,25 @@ export const EditorPane = (props: EditorPaneProps) => {
   const [e2eeSetupOpen, setE2eeSetupOpen] = useState(false);
   const [e2eeUnlockOpen, setE2eeUnlockOpen] = useState(false);
   const [e2eeConverting, setE2eeConverting] = useState(false);
+  const e2eeConvertingRef = useRef(e2eeConverting);
+  e2eeConvertingRef.current = e2eeConverting;
 
   useEffect(() => {
     const target = props.memo;
+    if (e2eeConvertingRef.current) {
+      return;
+    }
     if (!target || !encrypted || !e2ee.unlocked) {
-      setDecryptedState(null);
+      setDecryptedState((prev) => (prev === null ? prev : null));
       setDecrypting(false);
       setDecryptError(null);
       return;
     }
+    const cached = decryptedStateRef.current;
     if (
-      decryptedState
-      && decryptedState.memoId === target.id
-      && decryptedState.cipherMarkdown === target.contentMarkdown
+      cached
+      && cached.memoId === target.id
+      && cached.cipherMarkdown === target.contentMarkdown
     ) {
       setDecrypting(false);
       setDecryptError(null);
@@ -487,7 +496,7 @@ export const EditorPane = (props: EditorPaneProps) => {
         setDecryptError(t("e2ee.decryptFailed"));
       });
     return () => { cancelled = true; };
-  }, [decryptAttempt, decryptedState, e2ee.unlocked, encrypted, props.memo, t]);
+  }, [decryptAttempt, e2ee.unlocked, encrypted, props.memo?.contentMarkdown, props.memo?.id, t]);
 
   const effectiveMemo = useMemo(() => {
     if (!props.memo) return null;
@@ -571,18 +580,16 @@ export const EditorPane = (props: EditorPaneProps) => {
     };
   }, [encrypted, props.memo, props.repository]);
 
+  const { onSaved: propsOnSaved } = props;
   const effectiveOnSaved = useCallback(async (savedMemo: MemoDetail) => {
-    if (hasEncryptedNoteMarker(savedMemo.contentMarkdown)) {
-      rawCipherMemoRef.current = savedMemo;
-      await props.onSaved(savedMemo);
+    if (encrypted) {
+      if (rawCipherMemoRef.current?.id === savedMemo.id) {
+        await propsOnSaved(rawCipherMemoRef.current);
+      }
       return;
     }
-    if (encrypted && rawCipherMemoRef.current?.id === savedMemo.id) {
-      await props.onSaved(rawCipherMemoRef.current);
-      return;
-    }
-    await props.onSaved(savedMemo);
-  }, [encrypted, props]);
+    await propsOnSaved(savedMemo);
+  }, [encrypted, propsOnSaved]);
 
   const handleRequestEncryptNote = useCallback(async (snapshot: { title: string; contentMarkdown: string; tags: string[] }) => {
     const target = props.memo;
@@ -628,6 +635,7 @@ export const EditorPane = (props: EditorPaneProps) => {
     const target = props.memo;
     const snapshot = pendingEncryptSnapshot;
     if (!target || !snapshot) return;
+    e2eeConvertingRef.current = true;
     setE2eeConverting(true);
     try {
       const sealed = await e2eeSession.encryptMemo(target.id, snapshot.contentMarkdown);
@@ -646,16 +654,19 @@ export const EditorPane = (props: EditorPaneProps) => {
         localDb.drafts.delete(target.id).catch(() => undefined),
       ]);
       removeEmergencyDraft(target.id);
+      removeOutlineSnapshot(target.id);
       queryClient.removeQueries({ queryKey: ["memo-revisions", target.id] });
       rawCipherMemoRef.current = saved.memo;
-      setDecryptedState({
+      const nextDecrypted = {
         memoId: saved.memo.id,
         cipherMarkdown: saved.memo.contentMarkdown,
         plaintextMarkdown: snapshot.contentMarkdown,
-      });
+      };
+      decryptedStateRef.current = nextDecrypted;
+      setDecryptedState(nextDecrypted);
+      await props.onSaved(saved.memo);
       setEncryptConfirmOpen(false);
       setPendingEncryptSnapshot(null);
-      await props.onSaved(saved.memo);
     } catch (error) {
       setEncryptConfirmOpen(false);
       setPendingEncryptSnapshot(null);
@@ -664,6 +675,7 @@ export const EditorPane = (props: EditorPaneProps) => {
         description: error instanceof Error ? error.message : t("e2ee.cannotEncryptAttachments"),
       });
     } finally {
+      e2eeConvertingRef.current = false;
       setE2eeConverting(false);
     }
   }, [pendingEncryptSnapshot, props, queryClient, t]);
@@ -672,6 +684,7 @@ export const EditorPane = (props: EditorPaneProps) => {
     const target = props.memo;
     const snapshot = decryptConfirmSnapshot;
     if (!target || !snapshot) return;
+    e2eeConvertingRef.current = true;
     setE2eeConverting(true);
     try {
       const baseCipher = rawCipherMemoRef.current?.id === target.id ? rawCipherMemoRef.current : target;
@@ -684,12 +697,14 @@ export const EditorPane = (props: EditorPaneProps) => {
         contentJson: markdownToDoc(snapshot.contentMarkdown),
         contentMarkdown: snapshot.contentMarkdown,
         tags: snapshot.tags,
+        e2eeTransition: "decrypt",
       });
+      await props.onSaved(saved.memo);
       e2eeSession.evictMemoDek(baseCipher.id);
       rawCipherMemoRef.current = null;
+      decryptedStateRef.current = null;
       setDecryptedState(null);
       setDecryptConfirmSnapshot(null);
-      await props.onSaved(saved.memo);
     } catch (error) {
       setDecryptConfirmSnapshot(null);
       setE2eeNotice({
@@ -697,6 +712,7 @@ export const EditorPane = (props: EditorPaneProps) => {
         description: error instanceof Error ? error.message : t("e2ee.decryptFailed"),
       });
     } finally {
+      e2eeConvertingRef.current = false;
       setE2eeConverting(false);
     }
   }, [decryptConfirmSnapshot, props, t]);
@@ -907,6 +923,7 @@ const RichEditorPane = ({
   }, []);
   const aiBubbleMenu = useAiBubbleMenu();
   const spellcheckEnabled = useEditorSpellcheckPreference();
+  const effectiveSpellcheckEnabled = !isEncryptedNote && spellcheckEnabled;
   const [selectionPin, setSelectionPin] = useState<SelectionAiPin | null>(null);
   const [selectionRequest, setSelectionRequest] = useState<SelectionAiRequest | null>(null);
   const selectionPinRef = useRef<SelectionAiPin | null>(null);
@@ -1739,7 +1756,7 @@ const RichEditorPane = ({
       }),
       ImageUploadPlaceholderExtension,
       Placeholder.configure({
-        placeholder: () => aiSpaceShortcutEnabledRef.current
+        placeholder: () => (!isEncryptedNoteRef.current && aiSpaceShortcutEnabledRef.current)
           ? t("editor.placeholder")
           : t("editor.placeholderCommands"),
       }),
@@ -1754,7 +1771,8 @@ const RichEditorPane = ({
       clipboardTextSerializer: editorClipboardTextSerializer,
       attributes: {
         class: "edgeever-note-rich-editor prose prose-slate max-w-none focus:outline-none min-h-[240px] lg:min-h-[180px]",
-        spellcheck: spellcheckEnabled ? "true" : "false",
+        spellcheck: effectiveSpellcheckEnabled ? "true" : "false",
+        "data-encrypted-note": isEncryptedNote ? "true" : "false",
       },
       handleKeyDown: (view, event) => {
         if (view.editable) {
@@ -3477,6 +3495,8 @@ const RichEditorPane = ({
   }, [applyPropertyFields, getMarkdownSource, markDirty, setMarkdownSource]);
 
   const {
+    cancelPendingPlaintextExport,
+    confirmPendingPlaintextExport,
     handleCopyToWeChat,
     handleExportHtml,
     handleExportMarkdown,
@@ -3485,6 +3505,7 @@ const RichEditorPane = ({
     handleSaveAsTemplate,
     imageShareOpen,
     imageShareSource,
+    pendingPlaintextExport,
     setImageShareOpen,
     setShareOpen,
     shareOpen,
@@ -3497,6 +3518,7 @@ const RichEditorPane = ({
     effectiveReadOnly,
     getMobilePlainTextValue,
     hydratedEditorMemoId,
+    isEncryptedNote,
     markdownSource,
     memo,
     noteProse,
@@ -3508,6 +3530,17 @@ const RichEditorPane = ({
     useMarkdownSourceEditor,
     useMobilePlainTextEditor,
   });
+
+  useEffect(() => {
+    if (!isEditorReady(editor)) return;
+    const prevEncrypted = editor.view.dom.getAttribute("data-encrypted-note");
+    const nextEncrypted = isEncryptedNote ? "true" : "false";
+    editor.view.dom.setAttribute("spellcheck", effectiveSpellcheckEnabled ? "true" : "false");
+    editor.view.dom.setAttribute("data-encrypted-note", nextEncrypted);
+    if (prevEncrypted !== null && prevEncrypted !== nextEncrypted) {
+      editor.view.dispatch(editor.state.tr);
+    }
+  }, [editor, effectiveSpellcheckEnabled, isEncryptedNote]);
 
   const handleCopyMemoId = useCallback(async () => {
     if (!memo || isLocalMemoId(memo.id)) {
@@ -5377,7 +5410,7 @@ const RichEditorPane = ({
                   enterKeyHint="enter"
                   inputMode="text"
                   name="memo-body"
-                  spellCheck={spellcheckEnabled}
+                  spellCheck={effectiveSpellcheckEnabled}
                   data-edgeever-mobile-editor="plain-textarea"
                   aria-label={t("editor.noteBodyAria")}
                   className="block min-h-[60dvh] w-full resize-none border border-slate-200 bg-card px-4 py-3 pr-32 text-base leading-7 text-slate-950 outline-none placeholder:text-slate-400 sm:px-7"
@@ -5514,6 +5547,7 @@ const RichEditorPane = ({
               contentRef={setOutlineContent}
               collapsedAnchor={collapsedOutlineAnchor}
               collapsed={editorOutlineCollapsed}
+              persist={!isEncryptedNote}
               shortcutLabel={formatShortcutBinding(shortcutSettings.toggleOutline)}
               onCollapsedChange={handleEditorOutlineCollapsedChange}
             />
@@ -5682,6 +5716,13 @@ const RichEditorPane = ({
             }}
           />
         </Suspense>
+      )}
+
+      {pendingPlaintextExport && (
+        <EncryptedPlaintextExportConfirmDialog
+          onCancel={cancelPendingPlaintextExport}
+          onConfirm={confirmPendingPlaintextExport}
+        />
       )}
 
       {imgBedFailureDialog}

@@ -19,7 +19,13 @@ export const useMobileE2eeSession = () =>
 
 export const isMobileEncryptedMemo = (
   memo: Pick<MemoSummary, "encrypted"> & { contentMarkdown?: string | null } | null | undefined,
-): boolean => Boolean(memo && (memo.encrypted === true || hasEncryptedNoteMarker(memo.contentMarkdown)));
+): boolean => {
+  if (!memo) return false;
+  if (typeof memo.contentMarkdown === "string") {
+    return hasEncryptedNoteMarker(memo.contentMarkdown);
+  }
+  return memo.encrypted === true;
+};
 
 /**
  * Create a brand-new encrypted note online so its authoritative server `memoId`
