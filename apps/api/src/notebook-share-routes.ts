@@ -107,7 +107,7 @@ export const registerNotebookShareRoutes = (app: Hono<AppEnv>) => {
     const conditions = [
       "m.is_deleted = 0",
       "m.id > ?",
-      "NOT EXISTS (SELECT 1 FROM memo_contents emc WHERE emc.memo_id = m.id AND substr(emc.content_markdown, 1, 27) = '\`\`\`edgeever-encrypted-note' || char(10))",
+      "NOT EXISTS (SELECT 1 FROM memo_contents emc WHERE emc.memo_id = m.id AND substr(emc.content_markdown, 1, 27) = '```edgeever-encrypted-note' || char(10))",
     ];
     const binds: unknown[] = [share.token, c.req.query("cursor") ?? ""];
     if (visibility !== "all") conditions.push(`${visibility === "public" ? "NOT " : ""}${excludedSql}`);

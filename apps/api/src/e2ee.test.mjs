@@ -8,7 +8,6 @@ import {
   createPosterDocument,
   decryptNoteContent,
   emptyDoc,
-  encodeBase64,
   encryptNoteContent,
   hasEncryptedNoteMarker,
   initializeWorkspaceKeyring,
