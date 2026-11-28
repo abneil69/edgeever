@@ -14,6 +14,7 @@ import {
   mergeMemoDocs,
   getDiagramSummary,
   getEncryptedNoteSummary,
+  getImageOnlyDocumentImages,
   getInfographicSummary,
   getPosterSummary,
   getTableSummary,
@@ -879,7 +880,7 @@ export const mergeLocalMemos = async (scope: string, input: { memoIds: string[];
   }
   const sourceDocs = sources.map((memo) => {
     const doc = resolveMemoContentDoc(memo.contentJson, memo.contentMarkdown);
-    if (!docToText(doc).trim() && memo.contentText.trim()) {
+    if (!docToText(doc).trim() && memo.contentText.trim() && !getImageOnlyDocumentImages(doc)) {
       throw new Error("Source note content could not be recovered safely. Merge was cancelled.");
     }
     return doc;

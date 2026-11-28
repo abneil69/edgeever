@@ -1277,6 +1277,7 @@ export const WorkspaceApp = ({
 
   const createNotebookMutation = useMutation({
     mutationFn: repository.createNotebook,
+    networkMode: "always",
     onSuccess: async (data) => {
       clearPendingMemoSelection();
       setSelectedTag(null);
@@ -1481,6 +1482,10 @@ export const WorkspaceApp = ({
 
   const mergeMutation = useMutation({
     mutationFn: repository.mergeMemos,
+    onError: (error) => setAppNoticeDialog({
+      title: t("memoList.mergeMemos"),
+      description: error instanceof Error ? error.message : String(error),
+    }),
     onSuccess: async (data) => {
       clearMemoSelection();
       cacheMemoDetail(queryClient, data.memo, "notebook");
@@ -2171,7 +2176,7 @@ export const WorkspaceApp = ({
   };
 
   const handleMerge = () => {
-    if (selectedMemoIds.size < 2 || memoView === "trash") {
+    if (mergeMutation.isPending || selectedMemoIds.size < 2 || memoView === "trash" || selectionHasEncrypted) {
       return;
     }
 

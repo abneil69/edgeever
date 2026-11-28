@@ -1,29 +1,26 @@
 {
-  "version": "2.32.0",
+  "version": "2.34.0",
   "changes": {
     "en-US": [
-      "Desktop users can choose Antigravity Standalone or the agy CLI and clear a custom executable path. Thanks @yulei666 (#878).",
-      "Android loads smaller previews for images in notes. Full-screen viewing and downloads still use the original image. Thanks @flipcyde101 (#875, related to #869).",
-      "Poster rendering now uses server notifications, reducing requests from idle clients. For self-hosted instances, upgrade the server and clients together to use notifications.",
-      "Public share outlines show long headings in full and jump to sections in one click. Shared notebooks can sort titles in either direction, with numbers in natural order.",
-      "Web and desktop tables size columns to their content and show clearer alternating row shading. Thanks @geekqq (#884).",
-      "On Windows, headings that mix Japanese and Latin text use more consistent font weights. Thanks @Golden007-prog (#890)."
+      "Merging notes that contain only images combines them into one gallery in their original order. If any note also contains text, the notes stay separated by a divider. On a self-hosted instance, upgrade the server before the desktop app.",
+      "Opening a note that was merged offline on desktop shows its images instead of the image links as plain text.",
+      "On desktop, you can seek a video that has not finished syncing, including after sync replaces the local file.",
+      "Desktop attachment write-back no longer stops a transfer that is still making progress. Retrying after a successful save keeps the saved state, and an earlier download does not replace the confirmed offline cache. Thanks to @sivdead (#907).",
+      "In a Leeef Reader excerpt, the “摘录于 YYYY-MM-DD” line appears smaller and lighter in the Web, desktop, Android, and iOS editors and on share pages."
     ],
     "zh-CN": [
-      "桌面端可以在 Antigravity 独立版与 agy CLI 之间切换，也可以清除自定义可执行文件路径。感谢 @yulei666（#878）。",
-      "Android 笔记内的图片使用缩略图，全屏查看和下载仍使用原图。感谢 @flipcyde101（#875，关联 #869）。",
-      "海报渲染改由服务端通知，减少客户端空闲时的请求。自托管用户需同时更新服务端和客户端以使用通知。",
-      "公开分享页的大纲会完整显示长标题，点击一次即可跳转。分享笔记本支持按标题升序或降序排列，标题中的数字按自然顺序排序。",
-      "Web 和桌面端表格按内容调整列宽，交替行底色更清晰。感谢 @geekqq（#884）。",
-      "Windows 上混排日文和拉丁字母的标题字重更一致。感谢 @Golden007-prog（#890）。"
+      "合并多篇只含图片的笔记时，会按原来的顺序合成一个图库。其中任一篇还有文字时，仍用分隔线分开保留。自托管请先升级服务端，再升级桌面端。",
+      "桌面端离线合并的笔记在打开时会显示图片，不再把图片链接显示成纯文本。",
+      "桌面端可以拖动尚未完成同步的视频进度；同步替换本地文件后仍可定位播放。",
+      "桌面端附件回存在传输仍有进展时不再因固定时限中断。已经保存成功后再点重试会保持已回存，较早开始的下载也不会覆盖已确认的离线缓存。感谢 @sivdead（#907）。",
+      "来自 Leeef Reader 的书摘里，「摘录于 日期」会显示得更小、更淡。Web、桌面、Android 和 iOS 编辑器以及分享页都会生效。"
     ],
     "ja": [
-      "デスクトップ版で Antigravity 単体版と agy CLI を切り替え、カスタム実行ファイルのパスを解除できます。",
-      "Android のノート内画像は縮小プレビューを読み込み、全画面表示とダウンロードでは元の画像を使用します。",
-      "ポスター生成をサーバー通知に切り替え、待機中のリクエストを減らしました。セルフホスト環境ではサーバーとクライアントを更新してください。",
-      "公開ページの目次では長い見出しが全文表示され、ワンクリックで移動できます。共有ノートブックは数字を自然順で扱い、タイトルの昇順・降順で並べ替えられます。",
-      "Web 版とデスクトップ版の表は内容に合わせて列幅を調整し、行の交互色が見やすくなりました。",
-      "Windows で日本語とラテン文字が混在する見出しの太さを揃えました。"
+      "画像だけのノートを結合すると、元の順序で1つのギャラリーになります。文章を含むノートがある場合は、これまでどおり区切り線で分けて残します。セルフホストでは、デスクトップより先にサーバーを更新してください。",
+      "デスクトップでオフライン結合したノートを開くと、画像が表示され、画像リンクがプレーンテキストのまま残りません。",
+      "デスクトップでは、同期が終わる前の動画でも再生位置を移動できます。同期でローカルファイルが置き換わったあともシークできます。",
+      "デスクトップの添付ファイル書き戻しは、転送が進んでいる間は固定時間で中断しません。保存済みのあと再試行しても保存済みのまま残り、先に始まったダウンロードが確認済みのオフラインキャッシュを上書きしません。@sivdead（#907）",
+      "Leeef Reader の抜粋では、「摘录于 日付」がより小さく薄い文字で表示されます。Web、デスクトップ、Android、iOS のエディターと共有ページに適用されます。"
     ]
   }
 }
