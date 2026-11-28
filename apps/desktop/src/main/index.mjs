@@ -1,5 +1,5 @@
 import { app, autoUpdater as nativeAutoUpdater, Notification, BrowserWindow, Menu, Tray, globalShortcut, nativeImage, ipcMain, session, net, protocol, shell, dialog, safeStorage, systemPreferences, clipboard, ClipboardItem, powerMonitor, desktopCapturer, screen, utilityProcess } from "electron";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { appendFile, mkdir, open, readdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { execFile, spawn } from "node:child_process";
@@ -11,6 +11,7 @@ import { OffsiteBackup } from "./backup-offsite.mjs";
 import { createBackupWorkerFactory } from "./backup-worker.mjs";
 import { registerBackupIpc } from "./backup-ipc.mjs";
 import { createE2eeBiometricStore, registerE2eeBiometricIpc } from "./e2ee-biometric.mjs";
+import { createForkMacUpdater } from "./fork-mac-updater.mjs";
 import { SidecarRpcClient } from "./rpc.mjs";
 import { instanceOrigin, decodeSessionCredential, credentialForUrl, writeSessionCredential, clearInstanceSessionCookie } from "./session-credential.mjs";
 import { uploadAttachmentSnapshot } from "./attachment-upload.mjs";
@@ -389,8 +390,28 @@ const desktopDeviceModel = () => {
   return cachedDesktopDeviceModel;
 };
 
+let cachedForkReleaseMetadata;
+const readForkReleaseMetadata = () => {
+  if (cachedForkReleaseMetadata !== undefined) return cachedForkReleaseMetadata;
+  try {
+    const raw = readFileSync(join(app.getAppPath(), "package.json"), "utf8");
+    const pkg = JSON.parse(raw);
+    const repo = typeof pkg?.edgeeverForkRepo === "string" ? pkg.edgeeverForkRepo.trim() : "";
+    const releaseTag = typeof pkg?.edgeeverForkReleaseTag === "string" ? pkg.edgeeverForkReleaseTag.trim() : "";
+    cachedForkReleaseMetadata = repo ? { repo, releaseTag } : null;
+  } catch {
+    cachedForkReleaseMetadata = null;
+  }
+  return cachedForkReleaseMetadata;
+};
+
+const desktopEffectiveVersion = () => {
+  const releaseTag = readForkReleaseMetadata()?.releaseTag;
+  return releaseTag ? releaseTag.replace(/^v/i, "") : app.getVersion();
+};
+
 const desktopRuntimeSystemInfo = () => ({
-  appVersion: app.getVersion(),
+  appVersion: desktopEffectiveVersion(),
   autoUpdateSupported: true,
   platform: process.platform,
   architecture: process.arch,
@@ -1192,7 +1213,19 @@ const configureAutoUpdater = () => {
       appImage: process.env.APPIMAGE || null,
     });
   }
-  desktopUpdateController = createDesktopUpdateController({
+  const forkRelease = process.platform === "darwin" ? readForkReleaseMetadata() : null;
+  const forkMacUpdate = forkRelease
+    ? createForkMacUpdater({
+        repo: forkRelease.repo,
+        currentVersion: forkRelease.releaseTag || app.getVersion(),
+        arch: process.arch,
+        cacheDir: app.getPath("userData"),
+        execPath: process.execPath,
+        fetchImpl: net.fetch,
+        quitApplication: () => app.quit(),
+      })
+    : null;
+  const updateControllerOptions = {
     updater: autoUpdater,
     platform: process.platform,
     nativeUpdater: nativeAutoUpdater,
@@ -1238,6 +1271,10 @@ const configureAutoUpdater = () => {
         void writeDiagnostic("update.prompt-failed", { message: error.message });
       });
     },
+  };
+  desktopUpdateController = createDesktopUpdateController({
+    ...updateControllerOptions,
+    ...(forkMacUpdate ? { updater: forkMacUpdate.updater, nativeUpdater: forkMacUpdate.nativeUpdater } : {}),
   });
   void checkForDesktopUpdate("startup", { force: true });
   updateCheckTimer = setInterval(() => {

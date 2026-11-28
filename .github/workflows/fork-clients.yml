@@ -125,12 +125,18 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
+          release_tag=""
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          fi
           bun run --cwd apps/desktop dist -- \
             --mac dmg \
             --${{ matrix.arch }} \
             --publish never \
             -c.mac.identity=null \
-            -c.mac.notarize=false
+            -c.mac.notarize=false \
+            -c.extraMetadata.edgeeverForkRepo="${GITHUB_REPOSITORY}" \
+            -c.extraMetadata.edgeeverForkReleaseTag="${release_tag}"
 
       - name: Upload DMG artifact
         if: steps.guard.outputs.run == 'true'
