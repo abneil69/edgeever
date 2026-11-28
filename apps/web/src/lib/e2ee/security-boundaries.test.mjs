@@ -333,6 +333,9 @@ describe("Phase 2 E2EE security boundaries", () => {
       "utf8",
     );
     expect(editorPaneSource).toContain("const effectiveSpellcheckEnabled = !isEncryptedNote && spellcheckEnabled;");
+    expect(editorPaneSource).toContain("const aiBubbleMenu = useAiBubbleMenu({ disabled: isEncryptedNote });");
+    expect(editorPaneSource).toContain("shouldShow={aiBubbleMenu.shouldShow}");
+    expect(editorPaneSource).toContain("dom = editor.view.dom;");
     expect(editorPaneSource).toContain("persist={!isEncryptedNote}");
     expect(editorPaneSource).toContain("removeOutlineSnapshot(target.id);");
     expect(editorPaneSource).toContain("<EncryptedPlaintextExportConfirmDialog");

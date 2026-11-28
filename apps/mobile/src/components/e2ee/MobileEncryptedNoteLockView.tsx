@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { MemoDetail } from "@edgeever/shared";
 import { ScrollView, StyleSheet, View } from "react-native";
 import { ActivityIndicator, Fingerprint, LockKeyhole, RotateCcw } from "../icons";
@@ -39,20 +39,71 @@ export const MobileEncryptedNoteLockView = ({
     enabled: false,
     keyId: null,
   });
-
+  const skippedManualLockMemoIdRef = useRef<string | null>(
+    e2ee.lastLockReason === "manual" ? memo.id : null,
+  );
+  const autoPromptedKeyRef = useRef<string | null>(null);
+  const mountedRef = useRef(true);
   useEffect(() => {
-    setPassphrase("");
-    setError(null);
-    let active = true;
-    void mobileE2eeBiometricStore.status(e2ee.scope).then((status) => {
-      if (active) setBiometricStatus(status);
-    });
-    return () => { active = false; };
-  }, [e2ee.scope, memo.id]);
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const canUseBiometric = biometricStatus.available
     && biometricStatus.enabled
     && (!e2ee.keyId || biometricStatus.keyId === e2ee.keyId);
+
+  const handleBiometricUnlock = useCallback(async () => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      const result = await mobileE2eeBiometricStore.unlock(e2ee.scope, e2ee.keyId, bioCopy.promptReason);
+      await mobileE2eeSession.unlockWithMasterKeyBase64(result.keyId, result.masterKeyBase64);
+    } catch (err) {
+      if (!mountedRef.current) return;
+      const message = err instanceof Error ? err.message : "";
+      const isCancelled = /cancel|dismiss|negative button|user_canceled|authentication_canceled/i.test(message);
+      if (!isCancelled) {
+        setError(message || bioCopy.failed);
+      }
+      const nextStatus = await mobileE2eeBiometricStore.status(e2ee.scope).catch(() => null);
+      if (nextStatus && mountedRef.current) setBiometricStatus(nextStatus);
+    } finally {
+      if (mountedRef.current) {
+        setSubmitting(false);
+      }
+    }
+  }, [bioCopy.failed, bioCopy.promptReason, e2ee.keyId, e2ee.scope]);
+
+  useEffect(() => {
+    setPassphrase("");
+    setError(null);
+    if (skippedManualLockMemoIdRef.current && skippedManualLockMemoIdRef.current !== memo.id) {
+      skippedManualLockMemoIdRef.current = null;
+    }
+    let active = true;
+    void mobileE2eeBiometricStore.status(e2ee.scope).then((status) => {
+      if (!active) return;
+      setBiometricStatus(status);
+      const matches = status.available
+        && status.enabled
+        && (!e2ee.keyId || status.keyId === e2ee.keyId);
+      const promptKey = `${memo.id}:${e2ee.keyId ?? ""}`;
+      const justManuallyLockedHere =
+        skippedManualLockMemoIdRef.current === memo.id && e2ee.lastLockReason === "manual";
+      if (
+        matches
+        && !decrypting
+        && !e2ee.unlocked
+        && !justManuallyLockedHere
+        && autoPromptedKeyRef.current !== promptKey
+      ) {
+        autoPromptedKeyRef.current = promptKey;
+        void handleBiometricUnlock();
+      }
+    });
+    return () => { active = false; };
+  }, [decrypting, e2ee.keyId, e2ee.lastLockReason, e2ee.scope, e2ee.unlocked, handleBiometricUnlock, memo.id]);
 
   const handlePassphraseUnlock = async () => {
     if (!passphrase) {
@@ -66,21 +117,6 @@ export const MobileEncryptedNoteLockView = ({
       setPassphrase("");
     } catch {
       setError(copy.wrongPassphrase);
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleBiometricUnlock = async () => {
-    setSubmitting(true);
-    setError(null);
-    try {
-      const result = await mobileE2eeBiometricStore.unlock(e2ee.scope, e2ee.keyId, bioCopy.promptReason);
-      await mobileE2eeSession.unlockWithMasterKeyBase64(result.keyId, result.masterKeyBase64);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : bioCopy.failed);
-      const nextStatus = await mobileE2eeBiometricStore.status(e2ee.scope).catch(() => null);
-      if (nextStatus) setBiometricStatus(nextStatus);
     } finally {
       setSubmitting(false);
     }

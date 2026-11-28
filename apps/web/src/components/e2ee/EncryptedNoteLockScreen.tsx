@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { ChevronLeft, Fingerprint, Loader2, Lock } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { getMemoDisplayTitle, type MemoDetail } from "@edgeever/shared";
@@ -26,29 +26,22 @@ export const EncryptedNoteLockScreen = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
+  // If the user just clicked "Lock Now" on this note, do not immediately pop Touch ID back up.
+  const skippedManualLockMemoIdRef = useRef<string | null>(
+    e2ee.lastLockReason === "manual" ? memo.id : null,
+  );
+  const autoPromptedKeyRef = useRef<string | null>(null);
+  const onRetryDecryptRef = useRef(onRetryDecrypt);
+  onRetryDecryptRef.current = onRetryDecrypt;
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const displayTitle = getMemoDisplayTitle(memo.title, t("common.untitledMemo"));
 
-  useEffect(() => {
-    setPassphrase("");
-    setError(null);
-    let cancelled = false;
-    void window.edgeeverDesktop?.e2eeBiometricStatus?.()
-      .then((status) => {
-        if (cancelled) return;
-        setBiometricAvailable(Boolean(
-          status.available
-          && status.enabled
-          && (!e2ee.keyring?.keyId || status.keyId === e2ee.keyring.keyId),
-        ));
-      })
-      .catch(() => {
-        if (!cancelled) setBiometricAvailable(false);
-      });
-    return () => { cancelled = true; };
-  }, [e2ee.keyring?.keyId, memo.id]);
-
-  const handleBiometricUnlock = async () => {
+  const runBiometricUnlock = useCallback(async () => {
     if (!window.edgeeverDesktop?.e2eeBiometricUnlock) return;
     setError(null);
     setSubmitting(true);
@@ -58,9 +51,14 @@ export const EncryptedNoteLockScreen = ({
         reason: t("e2ee.touchIdReasonUnlock"),
       });
       e2eeSession.unlockWithMasterKeyBase64(unlocked.keyId, unlocked.masterKeyBase64);
-      onRetryDecrypt?.();
+      onRetryDecryptRef.current?.();
     } catch (err) {
+      if (!mountedRef.current) return;
       const code = (err as { code?: string } | null)?.code;
+      if (code === "e2ee_biometric_cancelled") {
+        // User cancelled or dismissed Touch ID; stay quietly on the passphrase form.
+        return;
+      }
       if (code === "e2ee_biometric_key_mismatch" || code === "e2ee_biometric_stale") {
         setBiometricAvailable(false);
         setError(t("e2ee.touchIdMismatch"));
@@ -68,9 +66,52 @@ export const EncryptedNoteLockScreen = ({
         setError(t("e2ee.touchIdFailed"));
       }
     } finally {
-      setSubmitting(false);
+      if (mountedRef.current) {
+        setSubmitting(false);
+      }
     }
-  };
+  }, [e2ee.keyring?.keyId, t]);
+
+  useEffect(() => {
+    setPassphrase("");
+    setError(null);
+    if (skippedManualLockMemoIdRef.current && skippedManualLockMemoIdRef.current !== memo.id) {
+      skippedManualLockMemoIdRef.current = null;
+    }
+    let cancelled = false;
+    void window.edgeeverDesktop?.e2eeBiometricStatus?.()
+      .then((status) => {
+        if (cancelled) return;
+        const available = Boolean(
+          status.available
+          && status.enabled
+          && (!e2ee.keyring?.keyId || status.keyId === e2ee.keyring.keyId),
+        );
+        setBiometricAvailable(available);
+        const promptKey = `${memo.id}:${e2ee.keyring?.keyId ?? ""}`;
+        const windowFocused = typeof document === "undefined"
+          || (document.visibilityState === "visible" && (typeof document.hasFocus !== "function" || document.hasFocus()));
+        const justManuallyLockedHere =
+          skippedManualLockMemoIdRef.current === memo.id && e2ee.lastLockReason === "manual";
+        if (
+          available
+          && !decrypting
+          && !e2ee.unlocked
+          && windowFocused
+          && !justManuallyLockedHere
+          && autoPromptedKeyRef.current !== promptKey
+        ) {
+          autoPromptedKeyRef.current = promptKey;
+          void runBiometricUnlock();
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setBiometricAvailable(false);
+      });
+    return () => { cancelled = true; };
+  }, [decrypting, e2ee.keyring?.keyId, e2ee.lastLockReason, e2ee.unlocked, memo.id, runBiometricUnlock]);
+
+  const handleBiometricUnlock = () => runBiometricUnlock();
 
   const handleUnlockSubmit = async (event: FormEvent) => {
     event.preventDefault();

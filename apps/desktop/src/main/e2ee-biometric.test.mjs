@@ -119,3 +119,42 @@ test("biometric store reports unavailable on non-darwin platforms and rejects un
     await rm(userDataDirectory, { recursive: true, force: true });
   }
 });
+
+test("concurrent Touch ID unlock calls share a single biometric prompt", async () => {
+  const userDataDirectory = await mkdtemp(join(tmpdir(), "edgeever-e2ee-bio-dedupe-"));
+  try {
+    let promptCount = 0;
+    let releasePrompt;
+    const store = createE2eeBiometricStore({
+      platform: "darwin",
+      systemPreferences: {
+        canPromptTouchID: () => true,
+        promptTouchID: async () => {
+          promptCount += 1;
+          if (promptCount === 1) return;
+          await new Promise((resolve) => { releasePrompt = resolve; });
+        },
+      },
+      safeStorage: makeSafeStorage(),
+      getScope: () => ({
+        userDataDirectory,
+        apiBaseUrl: "https://notes.example.test",
+        accountId: "user_a",
+      }),
+    });
+
+    const masterKeyBase64 = randomBytes(32).toString("base64");
+    await store.enable({ keyId: "ek_dedupe_123456", masterKeyBase64 });
+
+    const first = store.unlock({ expectedKeyId: "ek_dedupe_123456" });
+    const second = store.unlock({ expectedKeyId: "ek_dedupe_123456" });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(promptCount).toBe(2);
+    releasePrompt();
+    const [r1, r2] = await Promise.all([first, second]);
+    expect(r1).toEqual({ keyId: "ek_dedupe_123456", masterKeyBase64 });
+    expect(r2).toEqual({ keyId: "ek_dedupe_123456", masterKeyBase64 });
+  } finally {
+    await rm(userDataDirectory, { recursive: true, force: true });
+  }
+});

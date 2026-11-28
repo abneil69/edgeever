@@ -4223,5 +4223,7 @@ export const zhTW = {
     submit: "確認",
     unlock: "解鎖",
     saving: "處理中…",
+    enable: "啟用",
+    disable: "停用",
   },
 } as const;

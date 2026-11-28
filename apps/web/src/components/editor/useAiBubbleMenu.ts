@@ -32,7 +32,7 @@ export const shouldShowAiBubbleMenu = ({
   selectionHasText: boolean;
 }): boolean => enabled && editable && !selectionEmpty && selectionHasText;
 
-export const useAiBubbleMenu = () => {
+export const useAiBubbleMenu = ({ disabled = false }: { disabled?: boolean } = {}) => {
   const [enabled, setEnabled] = useState(readAiSelectionMenuPreference);
 
   useEffect(() => {
@@ -59,11 +59,11 @@ export const useAiBubbleMenu = () => {
   const shouldShow = useCallback<BubbleMenuShouldShow>(
     ({ editor }) => shouldShowAiBubbleMenu({
       editable: editor.isEditable,
-      enabled,
+      enabled: !disabled && enabled,
       selectionEmpty: editor.state.selection.empty,
       selectionHasText: hasAiTextSelection(editor.state),
     }),
-    [enabled],
+    [disabled, enabled],
   );
 
   return {

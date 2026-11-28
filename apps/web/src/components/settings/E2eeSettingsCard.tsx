@@ -193,7 +193,7 @@ export const E2eeSettingsCard = ({ demoMode }: { demoMode: boolean }) => {
                   onClick={() => void handleToggleBiometric()}
                   className="shrink-0 text-xs font-normal"
                 >
-                  {biometricStatus.enabled ? t("common.disable") : t("common.enable")}
+                  {biometricStatus.enabled ? t("e2ee.disable") : t("e2ee.enable")}
                 </Button>
               </div>
             ) : null}

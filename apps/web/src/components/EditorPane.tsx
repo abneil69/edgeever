@@ -32,8 +32,11 @@ import {
   AppWindow,
   CopyPlus,
   ClipboardType,
+  KeyRound,
   Lock,
   LockOpen,
+  ShieldCheck,
+  ShieldOff,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EditorTableContextMenu } from "@/components/EditorTableContextMenu";
@@ -746,7 +749,7 @@ export const EditorPane = (props: EditorPaneProps) => {
     return (
       <EncryptedNoteLockScreen
         memo={props.memo}
-        decrypting={e2ee.unlocked && decrypting}
+        decrypting={e2ee.unlocked && (decrypting || !decryptError)}
         decryptError={decryptError}
         onBackToList={props.onBackToList}
         onRetryDecrypt={() => setDecryptAttempt((count) => count + 1)}
@@ -938,7 +941,7 @@ const RichEditorPane = ({
     setAiAssistantOpenState(open);
     writeAiSidebarOpen(open);
   }, []);
-  const aiBubbleMenu = useAiBubbleMenu();
+  const aiBubbleMenu = useAiBubbleMenu({ disabled: isEncryptedNote });
   const spellcheckEnabled = useEditorSpellcheckPreference();
   const effectiveSpellcheckEnabled = !isEncryptedNote && spellcheckEnabled;
   const [selectionPin, setSelectionPin] = useState<SelectionAiPin | null>(null);
@@ -3550,14 +3553,20 @@ const RichEditorPane = ({
 
   useEffect(() => {
     if (!isEditorReady(editor)) return;
-    const prevEncrypted = editor.view.dom.getAttribute("data-encrypted-note");
+    let dom: HTMLElement;
+    try {
+      dom = editor.view.dom;
+    } catch {
+      return;
+    }
+    const prevEncrypted = dom.getAttribute("data-encrypted-note");
     const nextEncrypted = isEncryptedNote ? "true" : "false";
-    editor.view.dom.setAttribute("spellcheck", effectiveSpellcheckEnabled ? "true" : "false");
-    editor.view.dom.setAttribute("data-encrypted-note", nextEncrypted);
+    dom.setAttribute("spellcheck", effectiveSpellcheckEnabled ? "true" : "false");
+    dom.setAttribute("data-encrypted-note", nextEncrypted);
     if (prevEncrypted !== null && prevEncrypted !== nextEncrypted) {
       editor.view.dispatch(editor.state.tr);
     }
-  }, [editor, effectiveSpellcheckEnabled, isEncryptedNote]);
+  }, [editor, effectiveSpellcheckEnabled, isEncryptedNote, useMarkdownSourceEditor, useMobilePlainTextEditor]);
 
   const handleCopyMemoId = useCallback(async () => {
     if (!memo || isLocalMemoId(memo.id)) {
@@ -4801,14 +4810,14 @@ const RichEditorPane = ({
                 {isEncryptedNote && onLockEncryptedNote && (
                   <IconTooltip label={t("e2ee.lockNowButton")}>
                     <Button
-                      className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-50 px-2 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200 hover:bg-amber-100 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-900/60 dark:hover:bg-amber-950/70"
+                      className="inline-flex h-7 items-center gap-1 rounded-md bg-amber-50 px-2 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200 hover:bg-amber-100"
                       size="sm"
                       variant="ghost"
                       type="button"
                       aria-label={t("e2ee.lockNowButton")}
                       onClick={onLockEncryptedNote}
                     >
-                      <Lock className="h-3 w-3" aria-hidden="true" />
+                      <ShieldCheck className="h-3.5 w-3.5" aria-hidden="true" />
                       <span className="hidden sm:inline">{t("e2ee.encryptedBadge")}</span>
                     </Button>
                   </IconTooltip>
@@ -5128,7 +5137,7 @@ const RichEditorPane = ({
                     className="flex h-9 w-full items-center gap-2 px-3 text-left text-xs text-slate-700 hover:bg-slate-50 cursor-pointer outline-none"
                     onClick={onLockEncryptedNote}
                   >
-                    <Lock className="h-4 w-4 text-slate-500" />
+                    <KeyRound className="h-4 w-4 text-slate-500" />
                     {t("e2ee.lockNowButton")}
                   </DropdownMenuItem>
                 )}
@@ -5142,7 +5151,7 @@ const RichEditorPane = ({
                       tags: parseTagsText(tagsText),
                     })}
                   >
-                    <Lock className="h-4 w-4 text-slate-500" />
+                    <ShieldCheck className="h-4 w-4 text-slate-500" />
                     {t("e2ee.encryptNoteAction")}
                   </DropdownMenuItem>
                 )}
@@ -5156,7 +5165,7 @@ const RichEditorPane = ({
                       tags: parseTagsText(tagsText),
                     })}
                   >
-                    <LockOpen className="h-4 w-4 text-slate-500" />
+                    <ShieldOff className="h-4 w-4 text-slate-500" />
                     {t("e2ee.decryptNoteAction")}
                   </DropdownMenuItem>
                 )}
@@ -5513,7 +5522,7 @@ const RichEditorPane = ({
               >
                 <BubbleMenu
                   editor={editor}
-                  shouldShow={(props) => !isEncryptedNoteRef.current && aiBubbleMenu.shouldShow(props)}
+                  shouldShow={aiBubbleMenu.shouldShow}
                   options={aiBubbleMenu.options}
                 >
                   <SelectionAiActions

@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { AlertTriangle, Fingerprint, KeyRound, Lock, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
@@ -84,7 +84,7 @@ export const E2eeSetupDialog = ({
           <DialogDescription>{t("e2ee.setupDialogDescription")}</DialogDescription>
         </DialogHeader>
         <form onSubmit={(event) => void handleSubmit(event)} className="grid gap-4">
-          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-5 text-amber-900">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{t("e2ee.noRecoveryWarning")}</span>
           </div>
@@ -150,9 +150,43 @@ export const E2eeUnlockDialog = ({
   const [submitting, setSubmitting] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const autoPromptedForOpenRef = useRef(false);
+  const onOpenChangeRef = useRef(onOpenChange);
+  onOpenChangeRef.current = onOpenChange;
+  const onUnlockedRef = useRef(onUnlocked);
+  onUnlockedRef.current = onUnlocked;
+
+  const handleBiometricUnlock = useCallback(async () => {
+    if (!window.edgeeverDesktop?.e2eeBiometricUnlock) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      const unlocked = await window.edgeeverDesktop.e2eeBiometricUnlock({
+        expectedKeyId: e2ee.keyring?.keyId,
+        reason: t("e2ee.touchIdReasonUnlock"),
+      });
+      e2eeSession.unlockWithMasterKeyBase64(unlocked.keyId, unlocked.masterKeyBase64);
+      onOpenChangeRef.current(false);
+      onUnlockedRef.current?.();
+    } catch (err) {
+      const code = (err as { code?: string } | null)?.code;
+      if (code === "e2ee_biometric_cancelled") {
+        return;
+      }
+      if (code === "e2ee_biometric_key_mismatch" || code === "e2ee_biometric_stale") {
+        setBiometricAvailable(false);
+        setError(t("e2ee.touchIdMismatch"));
+      } else {
+        setError(t("e2ee.touchIdFailed"));
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }, [e2ee.keyring?.keyId, t]);
 
   useEffect(() => {
     if (!open) {
+      autoPromptedForOpenRef.current = false;
       setPassphrase("");
       setError(null);
       setSubmitting(false);
@@ -168,37 +202,18 @@ export const E2eeUnlockDialog = ({
           && (!e2ee.keyring?.keyId || status.keyId === e2ee.keyring.keyId),
         );
         setBiometricAvailable(matches);
+        const windowFocused = typeof document === "undefined"
+          || (document.visibilityState === "visible" && (typeof document.hasFocus !== "function" || document.hasFocus()));
+        if (matches && !e2ee.unlocked && windowFocused && !autoPromptedForOpenRef.current) {
+          autoPromptedForOpenRef.current = true;
+          void handleBiometricUnlock();
+        }
       })
       .catch(() => {
         if (!cancelled) setBiometricAvailable(false);
       });
     return () => { cancelled = true; };
-  }, [e2ee.keyring?.keyId, open]);
-
-  const handleBiometricUnlock = async () => {
-    if (!window.edgeeverDesktop?.e2eeBiometricUnlock) return;
-    setError(null);
-    setSubmitting(true);
-    try {
-      const unlocked = await window.edgeeverDesktop.e2eeBiometricUnlock({
-        expectedKeyId: e2ee.keyring?.keyId,
-        reason: t("e2ee.touchIdReasonUnlock"),
-      });
-      e2eeSession.unlockWithMasterKeyBase64(unlocked.keyId, unlocked.masterKeyBase64);
-      onOpenChange(false);
-      onUnlocked?.();
-    } catch (err) {
-      const code = (err as { code?: string } | null)?.code;
-      if (code === "e2ee_biometric_key_mismatch" || code === "e2ee_biometric_stale") {
-        setBiometricAvailable(false);
-        setError(t("e2ee.touchIdMismatch"));
-      } else {
-        setError(t("e2ee.touchIdFailed"));
-      }
-    } finally {
-      setSubmitting(false);
-    }
-  };
+  }, [e2ee.keyring?.keyId, e2ee.unlocked, handleBiometricUnlock, open]);
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
@@ -331,7 +346,7 @@ export const E2eeChangePassphraseDialog = ({
           <DialogDescription>{t("e2ee.changePassphraseDescription")}</DialogDescription>
         </DialogHeader>
         <form onSubmit={(event) => void handleSubmit(event)} className="grid gap-4">
-          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-5 text-amber-900 dark:border-amber-900/50 dark:bg-amber-950/30 dark:text-amber-200">
+          <div className="flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/80 p-3 text-xs leading-5 text-amber-900">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
             <span>{t("e2ee.changePassphraseNoWmkRotationNote")}</span>
           </div>

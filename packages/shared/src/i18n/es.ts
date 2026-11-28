@@ -4413,5 +4413,7 @@ export const es = {
     submit: "Confirm",
     unlock: "Unlock",
     saving: "Working…",
+    enable: "Enable",
+    disable: "Disable",
   },
 } as const;

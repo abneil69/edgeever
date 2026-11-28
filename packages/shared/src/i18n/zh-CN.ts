@@ -4223,5 +4223,7 @@ export const zhCN = {
     submit: "确认",
     unlock: "解锁",
     saving: "处理中…",
+    enable: "启用",
+    disable: "禁用",
   },
 } as const;

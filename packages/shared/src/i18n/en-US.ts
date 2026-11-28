@@ -4206,5 +4206,7 @@ export const enUS = {
     submit: "Confirm",
     unlock: "Unlock",
     saving: "Working…",
+    enable: "Enable",
+    disable: "Disable",
   },
 } as const;

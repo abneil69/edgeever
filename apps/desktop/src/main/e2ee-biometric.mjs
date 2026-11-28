@@ -76,6 +76,8 @@ export const createE2eeBiometricStore = ({
     if (filePath) await rm(filePath, { force: true });
   };
 
+  let inFlightUnlock = null;
+
   const status = async () => {
     const available = isAvailable();
     const { filePath, origin } = resolveScope();
@@ -148,56 +150,73 @@ export const createE2eeBiometricStore = ({
     if (!filePath) {
       throw createError("e2ee_biometric_unavailable", "Account storage scope is unavailable.");
     }
-    const record = await readStoredRecord(filePath);
-    if (!record) {
-      throw createError("e2ee_biometric_not_configured", "Touch ID unlock is not enabled for this account.");
+    const unlockKey = `${filePath}|${expectedKeyId ?? ""}`;
+    if (inFlightUnlock) {
+      if (inFlightUnlock.key === unlockKey) {
+        return inFlightUnlock.promise;
+      }
+      throw createError("e2ee_biometric_cancelled", "Another Touch ID prompt is already active.");
     }
-    if (record.invalid || record.origin !== origin) {
-      await clearFile(filePath);
-      throw createError("e2ee_biometric_stale", "Stored Touch ID credential was invalid and has been cleared.");
-    }
-    if (expectedKeyId && record.keyId !== expectedKeyId) {
-      await clearFile(filePath);
-      throw createError("e2ee_biometric_key_mismatch", "Stored Touch ID key does not match the current workspace keyring and has been cleared.");
-    }
-    const promptReason = typeof reason === "string" && reason.trim()
-      ? reason.trim().slice(0, 200)
-      : "unlock EdgeEver encrypted notes";
+    const run = (async () => {
+      const record = await readStoredRecord(filePath);
+      if (!record) {
+        throw createError("e2ee_biometric_not_configured", "Touch ID unlock is not enabled for this account.");
+      }
+      if (record.invalid || record.origin !== origin) {
+        await clearFile(filePath);
+        throw createError("e2ee_biometric_stale", "Stored Touch ID credential was invalid and has been cleared.");
+      }
+      if (expectedKeyId && record.keyId !== expectedKeyId) {
+        await clearFile(filePath);
+        throw createError("e2ee_biometric_key_mismatch", "Stored Touch ID key does not match the current workspace keyring and has been cleared.");
+      }
+      const promptReason = typeof reason === "string" && reason.trim()
+        ? reason.trim().slice(0, 200)
+        : "unlock EdgeEver encrypted notes";
+      try {
+        await systemPreferences.promptTouchID(promptReason);
+      } catch {
+        throw createError("e2ee_biometric_cancelled", "Touch ID verification was cancelled or failed.");
+      }
+      let decryptedText;
+      try {
+        decryptedText = safeStorage.decryptString(Buffer.from(record.ciphertextBase64, "base64"));
+      } catch {
+        await clearFile(filePath);
+        throw createError("e2ee_biometric_decrypt_failed", "Stored Touch ID credential could not be decrypted and has been cleared.");
+      }
+      let payload;
+      try {
+        payload = JSON.parse(decryptedText);
+      } catch {
+        await clearFile(filePath);
+        throw createError("e2ee_biometric_stale", "Stored Touch ID credential was corrupted and has been cleared.");
+      }
+      if (
+        !payload
+        || typeof payload !== "object"
+        || payload.version !== BIOMETRIC_RECORD_VERSION
+        || payload.origin !== origin
+        || payload.keyId !== record.keyId
+        || (expectedKeyId && payload.keyId !== expectedKeyId)
+        || !isValidMasterKeyBase64(payload.masterKeyBase64)
+      ) {
+        await clearFile(filePath);
+        throw createError("e2ee_biometric_key_mismatch", "Stored Touch ID credential did not match the expected key and has been cleared.");
+      }
+      return {
+        keyId: payload.keyId,
+        masterKeyBase64: payload.masterKeyBase64,
+      };
+    })();
+    inFlightUnlock = { key: unlockKey, promise: run };
     try {
-      await systemPreferences.promptTouchID(promptReason);
-    } catch {
-      throw createError("e2ee_biometric_cancelled", "Touch ID verification was cancelled or failed.");
+      return await run;
+    } finally {
+      if (inFlightUnlock?.promise === run) {
+        inFlightUnlock = null;
+      }
     }
-    let decryptedText;
-    try {
-      decryptedText = safeStorage.decryptString(Buffer.from(record.ciphertextBase64, "base64"));
-    } catch {
-      await clearFile(filePath);
-      throw createError("e2ee_biometric_decrypt_failed", "Stored Touch ID credential could not be decrypted and has been cleared.");
-    }
-    let payload;
-    try {
-      payload = JSON.parse(decryptedText);
-    } catch {
-      await clearFile(filePath);
-      throw createError("e2ee_biometric_stale", "Stored Touch ID credential was corrupted and has been cleared.");
-    }
-    if (
-      !payload
-      || typeof payload !== "object"
-      || payload.version !== BIOMETRIC_RECORD_VERSION
-      || payload.origin !== origin
-      || payload.keyId !== record.keyId
-      || (expectedKeyId && payload.keyId !== expectedKeyId)
-      || !isValidMasterKeyBase64(payload.masterKeyBase64)
-    ) {
-      await clearFile(filePath);
-      throw createError("e2ee_biometric_key_mismatch", "Stored Touch ID credential did not match the expected key and has been cleared.");
-    }
-    return {
-      keyId: payload.keyId,
-      masterKeyBase64: payload.masterKeyBase64,
-    };
   };
 
   const disable = async () => {
