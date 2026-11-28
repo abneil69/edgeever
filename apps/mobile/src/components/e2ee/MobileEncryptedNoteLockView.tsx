@@ -17,11 +17,13 @@ export const MobileEncryptedNoteLockView = ({
   decryptError,
   decrypting,
   memo,
+  suppressAutoBiometric = false,
   onRetryDecrypt,
 }: {
   decryptError: string | null;
   decrypting: boolean;
   memo: MemoDetail;
+  suppressAutoBiometric?: boolean;
   onRetryDecrypt: () => void;
 }) => {
   const { resolvedLocale } = useMobileLocale();
@@ -39,9 +41,6 @@ export const MobileEncryptedNoteLockView = ({
     enabled: false,
     keyId: null,
   });
-  const skippedManualLockMemoIdRef = useRef<string | null>(
-    e2ee.lastLockReason === "manual" ? memo.id : null,
-  );
   const autoPromptedKeyRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -78,9 +77,6 @@ export const MobileEncryptedNoteLockView = ({
   useEffect(() => {
     setPassphrase("");
     setError(null);
-    if (skippedManualLockMemoIdRef.current && skippedManualLockMemoIdRef.current !== memo.id) {
-      skippedManualLockMemoIdRef.current = null;
-    }
     let active = true;
     void mobileE2eeBiometricStore.status(e2ee.scope).then((status) => {
       if (!active) return;
@@ -89,13 +85,11 @@ export const MobileEncryptedNoteLockView = ({
         && status.enabled
         && (!e2ee.keyId || status.keyId === e2ee.keyId);
       const promptKey = `${memo.id}:${e2ee.keyId ?? ""}`;
-      const justManuallyLockedHere =
-        skippedManualLockMemoIdRef.current === memo.id && e2ee.lastLockReason === "manual";
       if (
         matches
         && !decrypting
         && !e2ee.unlocked
-        && !justManuallyLockedHere
+        && !suppressAutoBiometric
         && autoPromptedKeyRef.current !== promptKey
       ) {
         autoPromptedKeyRef.current = promptKey;
@@ -103,7 +97,7 @@ export const MobileEncryptedNoteLockView = ({
       }
     });
     return () => { active = false; };
-  }, [decrypting, e2ee.keyId, e2ee.lastLockReason, e2ee.scope, e2ee.unlocked, handleBiometricUnlock, memo.id]);
+  }, [decrypting, e2ee.keyId, e2ee.scope, e2ee.unlocked, handleBiometricUnlock, memo.id, suppressAutoBiometric]);
 
   const handlePassphraseUnlock = async () => {
     if (!passphrase) {

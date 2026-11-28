@@ -11,12 +11,14 @@ export const EncryptedNoteLockScreen = ({
   memo,
   decrypting = false,
   decryptError = null,
+  suppressAutoBiometric = false,
   onBackToList,
   onRetryDecrypt,
 }: {
   memo: MemoDetail;
   decrypting?: boolean;
   decryptError?: string | null;
+  suppressAutoBiometric?: boolean;
   onBackToList?: () => void;
   onRetryDecrypt?: () => void;
 }) => {
@@ -26,10 +28,6 @@ export const EncryptedNoteLockScreen = ({
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [biometricAvailable, setBiometricAvailable] = useState(false);
-  // If the user just clicked "Lock Now" on this note, do not immediately pop Touch ID back up.
-  const skippedManualLockMemoIdRef = useRef<string | null>(
-    e2ee.lastLockReason === "manual" ? memo.id : null,
-  );
   const autoPromptedKeyRef = useRef<string | null>(null);
   const onRetryDecryptRef = useRef(onRetryDecrypt);
   onRetryDecryptRef.current = onRetryDecrypt;
@@ -75,9 +73,6 @@ export const EncryptedNoteLockScreen = ({
   useEffect(() => {
     setPassphrase("");
     setError(null);
-    if (skippedManualLockMemoIdRef.current && skippedManualLockMemoIdRef.current !== memo.id) {
-      skippedManualLockMemoIdRef.current = null;
-    }
     let cancelled = false;
     void window.edgeeverDesktop?.e2eeBiometricStatus?.()
       .then((status) => {
@@ -91,14 +86,12 @@ export const EncryptedNoteLockScreen = ({
         const promptKey = `${memo.id}:${e2ee.keyring?.keyId ?? ""}`;
         const windowFocused = typeof document === "undefined"
           || (document.visibilityState === "visible" && (typeof document.hasFocus !== "function" || document.hasFocus()));
-        const justManuallyLockedHere =
-          skippedManualLockMemoIdRef.current === memo.id && e2ee.lastLockReason === "manual";
         if (
           available
           && !decrypting
           && !e2ee.unlocked
           && windowFocused
-          && !justManuallyLockedHere
+          && !suppressAutoBiometric
           && autoPromptedKeyRef.current !== promptKey
         ) {
           autoPromptedKeyRef.current = promptKey;
@@ -109,7 +102,7 @@ export const EncryptedNoteLockScreen = ({
         if (!cancelled) setBiometricAvailable(false);
       });
     return () => { cancelled = true; };
-  }, [decrypting, e2ee.keyring?.keyId, e2ee.lastLockReason, e2ee.unlocked, memo.id, runBiometricUnlock]);
+  }, [decrypting, e2ee.keyring?.keyId, e2ee.unlocked, memo.id, runBiometricUnlock, suppressAutoBiometric]);
 
   const handleBiometricUnlock = () => runBiometricUnlock();
 

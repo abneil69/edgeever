@@ -203,6 +203,11 @@ import { updateMemoReadingStyle, useMemoReadingStyle } from "@/lib/memo-reading-
 import { createClientUuid } from "@/lib/client-id";
 import { deleteLocalMemoRevisions, isLocalMemoId, remapLocalDraftMemoId } from "@/lib/local-mirror";
 import { e2eeSession, isEncryptedMemo, useE2eeSession } from "@/lib/e2ee";
+import {
+  advanceAutoBiometricGuard,
+  createAutoBiometricGuardState,
+  shouldSuppressAutoBiometric,
+} from "@/lib/e2ee/auto-biometric-guard";
 import { EncryptedNoteLockScreen } from "./e2ee/EncryptedNoteLockScreen";
 import { E2eeSetupDialog, E2eeUnlockDialog, EncryptedPlaintextExportConfirmDialog } from "./e2ee/E2eePassphraseDialogs";
 import { AppConfirmDialog } from "./dialogs/ConfirmDialogs";
@@ -447,6 +452,16 @@ export const EditorPane = (props: EditorPaneProps) => {
   const [decrypting, setDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [decryptAttempt, setDecryptAttempt] = useState(0);
+  const autoBiometricGuardRef = useRef(createAutoBiometricGuardState(e2ee.unlocked));
+  autoBiometricGuardRef.current = advanceAutoBiometricGuard(
+    autoBiometricGuardRef.current,
+    props.memo?.id ?? null,
+    e2ee.unlocked,
+  );
+  const suppressAutoBiometric = shouldSuppressAutoBiometric(
+    autoBiometricGuardRef.current,
+    props.memo?.id ?? null,
+  );
 
   const [e2eeNotice, setE2eeNotice] = useState<{ title: string; description: string } | null>(null);
   const [pendingEncryptSnapshot, setPendingEncryptSnapshot] = useState<{ title: string; contentMarkdown: string; tags: string[] } | null>(null);
@@ -751,6 +766,7 @@ export const EditorPane = (props: EditorPaneProps) => {
         memo={props.memo}
         decrypting={e2ee.unlocked && (decrypting || !decryptError)}
         decryptError={decryptError}
+        suppressAutoBiometric={suppressAutoBiometric}
         onBackToList={props.onBackToList}
         onRetryDecrypt={() => setDecryptAttempt((count) => count + 1)}
       />

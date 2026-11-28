@@ -530,6 +530,35 @@ export const MemoDetailModal = ({
   const [decrypting, setDecrypting] = useState(false);
   const [decryptError, setDecryptError] = useState<string | null>(null);
   const [decryptAttempt, setDecryptAttempt] = useState(0);
+  const autoBiometricGuardRef = useRef<{
+    lastMemoId: string | null;
+    lastUnlocked: boolean;
+    suppressedMemoId: string | null;
+  }>({
+    lastMemoId: null,
+    lastUnlocked: e2ee.unlocked,
+    suppressedMemoId: null,
+  });
+  {
+    const prev = autoBiometricGuardRef.current;
+    const currMemoId = memo?.id ?? null;
+    let suppressedMemoId = prev.suppressedMemoId;
+    if (currMemoId !== prev.lastMemoId) {
+      suppressedMemoId = null;
+    } else if (prev.lastUnlocked && !e2ee.unlocked && currMemoId !== null) {
+      suppressedMemoId = currMemoId;
+    } else if (e2ee.unlocked) {
+      suppressedMemoId = null;
+    }
+    autoBiometricGuardRef.current = {
+      lastMemoId: currMemoId,
+      lastUnlocked: e2ee.unlocked,
+      suppressedMemoId,
+    };
+  }
+  const suppressAutoBiometric = Boolean(
+    memo?.id && autoBiometricGuardRef.current.suppressedMemoId === memo.id,
+  );
   const safeAreaInsets = useSafeAreaInsets();
   const [actionsOpen, setActionsOpen] = useState(false);
   const [aiAssistantOpen, setAiAssistantOpen] = useState(false);
@@ -1534,6 +1563,7 @@ export const MemoDetailModal = ({
             decryptError={decryptError}
             decrypting={e2ee.unlocked && decrypting}
             memo={memo}
+            suppressAutoBiometric={suppressAutoBiometric}
             onRetryDecrypt={() => setDecryptAttempt((count) => count + 1)}
           />
         ) : effectiveMemo && memo ? (
